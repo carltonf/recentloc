@@ -1,5 +1,5 @@
-;;; TODO more sanity checks
-
+;;;: Generic helper functions
+;; TODO more sanity checks
 (defun line-number-at-marker (one-marker)
   "Get the line number of the marker at its corresponding buffer.
 Return nil if `one-marker' is not valid."
@@ -10,6 +10,14 @@ Return nil if `one-marker' is not valid."
           (line-number-at-pos one-marker))
       (warn "%s is invalid!" one-marker)
       nil)))
+
+(defun pos-in-region-p (pos/mark region)
+  "Return true if POS/MARK is in the REGION. REGION is a
+cons (beg . end)."
+  (let ((pos (if (markerp pos/mark) (marker-position) pos/mark))
+        (beg (car region))
+        (end (cdr region)))
+    (<= beg pos end)))
 
 ;;; search around `line-number-at-marker'
 (defvar recentloc-context-line-num 5
@@ -309,8 +317,7 @@ the marker, but might contain other metadata in the future."
                    (progn
                      (setq mk-region (recentloc-get-context-region mk))
                      (when (and (eq buf mk-buf)
-                                (>= pos (car mk-region))
-                                (<= pos (cdr mk-region)))
+                                (pos-in-region-p pos mk-region))
                        (setq is-new-marker nil)))
                  ;; clean ineffective marker
                  (remhash mk recentloc-marker-table))))
