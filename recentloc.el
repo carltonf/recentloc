@@ -1,3 +1,6 @@
+(require 'subr-x)
+
+
 ;;;: Generic helper functions
 ;; TODO more sanity checks
 (defun line-number-at-marker (one-marker)
@@ -11,26 +14,29 @@ Return nil if `one-marker' is not valid."
       (warn "%s is invalid!" one-marker)
       nil)))
 
-(defun pos-in-region-p (pos/mark region)
-  "Return true if POS/MARK is in the REGION. REGION is a
+(defun pos-in-region-p (pos/marker region)
+  "Return true if POS/MARKER is in the REGION. REGION is a
 cons (beg . end)."
-  (let ((pos (if (markerp pos/mark) (marker-position) pos/mark))
+  (let ((pos (if (markerp pos/marker) (marker-position) pos/marker))
         (beg (car region))
         (end (cdr region)))
     (<= beg pos end)))
 
-;;; search around `line-number-at-marker'
+;;;: Mode specific setting
 (defvar recentloc-context-line-num 5
-  "The number of lines around context that need to be searched for.")
+  "The number of lines around the marker that is considered to be
+the context.")
 
-(defun recentloc-get-context-region (one-marker)
-  "Return a cons (BEG . END) of the context region around
-  ONE-MARKER, i.e. the +/- `recentloc-context-line-num' lines
-  around the line where ONE-MARKER lies."
-  (with-current-buffer (marker-buffer one-marker)
+(defun recentloc-get-context-region (pos/marker)
+  "Return the context region (BEG . END) around POS/MARKER, i.e.
+the +/-`recentloc-context-line-num' lines around the line where
+POS/MARKER lies. POS/MARKER can be either a position or marker."
+  (with-current-buffer (if (markerp pos/marker)
+                           (marker-buffer pos/marker)
+                         (current-buffer))
    (let ((min-line 1)
          (max-line (line-number-at-pos (point-max)))
-         (marker-line (line-number-at-marker one-marker))
+         (marker-line (line-number-at-marker pos/marker))
          beg-line end-line
          beg end)
      (setq beg-line (if (< (- marker-line min-line) recentloc-context-line-num)
@@ -49,10 +55,6 @@ cons (beg . end)."
        (setq end (line-end-position)))
      (cons beg end))))
 
-(defvar recentloc-overlays nil
-  "List of overlays of the recentloc buffer.")
-
-;;; search through all markers' context
 (defun recentloc-search-markers (query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers."
@@ -69,6 +71,37 @@ matched markers."
                         (goto-char (car context-region))
                         (re-search-forward query-re (cdr context-region) t)))))))
         collect marker))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;: Main mode facility
+
+;; TODO move to `provide'-related place
+(defun recentloc-initializer ()
+  "Initialize necessary bits for `recentloc' to work properly."
+  ;;: mode line setup
+  (unless (member 'recentloc-mode-line-indicator
+                  (default-value 'mode-line-buffer-identification))
+    (customize-set-variable 'mode-line-buffer-identification
+                            (append mode-line-buffer-identification
+                                    '(recentloc-mode-line-indicator))))
+  ;;: marker manager setup
+  ;; don't add to local hook as local and global hooks all get executed
+  (add-hook 'pre-command-hook #'recentloc-marker-recorder t)
+  (setq recentloc-marker-record-analyzer-idle-timer
+        (run-with-idle-timer
+         (max recentloc-marker-record-analyzer-idle-delay 2) 'repeat
+         #'recentloc-marker-record-analyzer)))
+
+(defun recentloc-deinitializer ()
+  "Clean up `recentloc'-related settings."
+  (when recentloc-marker-record-analyzer-idle-timer
+    (cancel-timer recentloc-marker-record-analyzer-idle-timer))
+  (remove-hook 'pre-command-hook #'recentloc-marker-recorder)
+  (when (member 'recentloc-mode-line-indicator
+                (default-value 'mode-line-buffer-identification))
+    (customize-set-variable 'mode-line-buffer-identification
+                            (delq 'recentloc-mode-line-indicator
+                                  mode-line-buffer-identification))))
 
 (defvar recentloc-input-idle-delay 0.1
   "Be idle for this many seconds before updating recentloc
@@ -95,6 +128,9 @@ searching results")
     (with-selected-window recentloc-buffer-window
       (goto-char marker)
       (recenter))))
+
+(defvar recentloc-overlays nil
+  "List of overlays of the recentloc buffer.")
 
 (defun recentloc-reset-overlays ()
   "Reset recentloc overlays."
@@ -127,16 +163,6 @@ after `recentloc-display-buffer-simple'."
   "Mode line indicator for `recentloc'.")
 (put 'recentloc-mode-line-indicator 'risky-local-variable t)
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; put `recentloc-mode-line-indicator' to mode line
-
-;; Set up default `mode-line-buffer-identification'
-(unless (member 'recentloc-mode-line-indicator
-                (default-value 'mode-line-buffer-identification))
-  (customize-set-variable 'mode-line-buffer-identification
-                          (append mode-line-buffer-identification
-                                  '(recentloc-mode-line-indicator))))
-
 (defun recentloc-update-mode-line-indicator (&optional idx tcount)
   "Helper function to update `recentloc-mode-line-indicator'. IF
 IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
@@ -162,8 +188,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
         )
     (setq recentloc-mode-line-indicator nil)))
 
-;;; master command
-(require 'subr-x)
+;;; main command
 (defun recentloc-jump ()
   "Master command to jump to a position using `recentloc'"
   (interactive)
@@ -254,29 +279,31 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
         (recentloc-reset-overlays)
         (recentloc-update-mode-line-indicator)))))
 
+;;; TODO move this to user settings
 (global-set-key (kbd "C-z m") #'recentloc-jump)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;;: Auto marker generator
-;; don't add to local hook as local and global hooks all get executed
-(add-hook 'pre-command-hook #'recentloc-command-recorder t)
+;;;: Marker Generator & Manager
+;;;: Terms:
+;; Record: raw markers recorded by `recentloc-marker-recorder'
+;; Table: parsed and managed markers, stored in `recentloc-marker-table'
 
 (defvar recentloc-marker-table (make-hash-table :test #'eq)
   "A table to hold all recentloc markers and their metadata.")
 
-(defun recentloc-command-record-analyzer ()
-  "Analyze `recentloc-command-record-ring' to extract needed
+(defun recentloc-marker-record-analyzer ()
+  "Analyze `recentloc-marker-record-ring' to extract needed
 useful markers to `recentloc-marker-table'. NOTE this function also
-reset `recentloc-command-record-ring'."
+reset `recentloc-marker-record-ring'."
   ;; TODO consider longer history, currently we only take the tip into
   ;; consideration since this function is run when Emacs is idle with < 3 sec.
-  (let* ((record-ring-len (ring-length recentloc-command-record-ring))
+  (let* ((record-ring-len (ring-length recentloc-marker-record-ring))
          (curbuf (current-buffer))
          (curpos (point))         
          idx-cmd-mk idx-cmd idx-mk idx-mk-buf idx-mk-region
          (result (catch 'break
                    (loop for idx from 0 below record-ring-len do
-                         (setq idx-cmd-mk (ring-ref recentloc-command-record-ring idx)
+                         (setq idx-cmd-mk (ring-ref recentloc-marker-record-ring idx)
                                idx-cmd (car idx-cmd-mk)
                                idx-mk (cdr idx-cmd-mk)
                                idx-mk-buf (marker-buffer idx-mk))
@@ -289,7 +316,7 @@ reset `recentloc-command-record-ring'."
     (when result
       (recentloc-marker-table-updater result)
       (loop repeat record-ring-len
-            do (ring-remove recentloc-command-record-ring)))))
+            do (ring-remove recentloc-marker-record-ring)))))
 
 (defun recentloc-marker-table-updater (arg)
   "Update `recentloc-marker-table' with ARG. ARG for now is only
@@ -314,37 +341,35 @@ the marker, but might contain other metadata in the future."
       ;; TODO replace t with more useful metadata
       (puthash arg t recentloc-marker-table))))
 
-(defvar recentloc-marker-analyzer-idle-delay 2
+(defvar recentloc-marker-record-analyzer-idle-delay 2
   "The idle time needed for analyzer to generate markers
 according to history.")
 
-(defvar recentloc-command-record-analyzer-idle-timer
-  (run-with-idle-timer
-   (max recentloc-marker-analyzer-idle-delay 2) 'repeat
-   #'recentloc-command-record-analyzer))
+(defvar recentloc-marker-record-analyzer-idle-timer nil
+  "Idle timer for `recentloc-marker-record-analyzer'.")
 
-(defvar recentloc-command-record-ring (make-ring 64)
+(defvar recentloc-marker-record-ring (make-ring 64)
   "A ring to record all commands. Each element is a cons cell
 like (command-symbol . marker). This is ring is initialized to be
 non-empty.")
 
-(defun recentloc-command-recorder ()
+(defun recentloc-marker-recorder ()
   "Records command execution in `command-frequency-table' hash."
   (unless (or (active-minibuffer-window)
               (helm-alive-p)
               (bound-and-true-p edebug-active)
               (bound-and-true-p company-candidates)
               ;; don't record repeated entries
-              (and (not (ring-empty-p recentloc-command-record-ring))
-                   (eq (car (ring-ref recentloc-command-record-ring 0))
+              (and (not (ring-empty-p recentloc-marker-record-ring))
+                   (eq (car (ring-ref recentloc-marker-record-ring 0))
                        real-this-command)))
-    (ring-insert recentloc-command-record-ring
+    (ring-insert recentloc-marker-record-ring
                  (cons real-this-command (point-marker)))
     ;; DBG: this inferences with `transient-mark-mode'
     ;; (let ((record-buf (get-buffer-create " *recentloc-command-records*")))
     ;;   (with-current-buffer record-buf
     ;;     (goto-char (point-max))
     ;;     (insert (symbol-name real-this-command) "-->\n"
-    ;;             (pp-to-string (ring-elements recentloc-command-record-ring))
+    ;;             (pp-to-string (ring-elements recentloc-marker-record-ring))
     ;;             "\n")))
     ))
