@@ -271,36 +271,25 @@ reset `recentloc-command-record-ring'."
   ;; TODO consider longer history, currently we only take the tip into
   ;; consideration since this function is run when Emacs is idle with < 3 sec.
   (let* ((record-ring-len (ring-length recentloc-command-record-ring))
-         (last-idx (catch 'alive-marker
-                     (loop for idx from 0 below record-ring-len
-                           when (buffer-live-p
-                                 (marker-buffer
-                                  (cdr (ring-ref recentloc-command-record-ring idx))))
-                           do (throw 'alive-marker idx)))))
-    (when last-idx
-      (let* ((last-cmd-mk (ring-ref recentloc-command-record-ring last-idx))
-             (last-cmd (car last-cmd-mk))
-             (last-mk (cdr last-cmd-mk))
-             (last-cmd-buf (marker-buffer last-mk))
-             (last-cmd-region (recentloc-get-context-region last-mk))
-             idx-cmd-mk idx-cmd idx-mk idx-cmd-buf idx-cmd-pos
-             (result (loop for idx from (1+ last-idx) below record-ring-len
-                           when (progn
-                                  (setq idx-cmd-mk (ring-ref recentloc-command-record-ring idx)
-                                        idx-cmd (car idx-cmd-mk)
-                                        idx-mk (cdr idx-cmd-mk)
-                                        idx-cmd-buf (marker-buffer idx-mk)
-                                        idx-cmd-pos (marker-position idx-mk))
-                                  (and (buffer-live-p idx-cmd-buf)
-                                       (or (not (eq last-cmd-buf idx-cmd-buf))
-                                           ;; outside the region
-                                           (or (> (car last-cmd-region) idx-cmd-pos)
-                                               (> idx-cmd-pos (cdr last-cmd-region))))))
-                           return idx-mk)))
-        (when result
-          (recentloc-marker-table-updater last-mk)
-          (loop repeat record-ring-len
-                do (ring-remove recentloc-command-record-ring)))))))
+         (curbuf (current-buffer))
+         (curpos (point))         
+         idx-cmd-mk idx-cmd idx-mk idx-mk-buf idx-mk-region
+         (result (catch 'break
+                   (loop for idx from 0 below record-ring-len do
+                         (setq idx-cmd-mk (ring-ref recentloc-command-record-ring idx)
+                               idx-cmd (car idx-cmd-mk)
+                               idx-mk (cdr idx-cmd-mk)
+                               idx-mk-buf (marker-buffer idx-mk))
+                         (when (buffer-live-p idx-mk-buf)
+                           (setq idx-mk-region (recentloc-get-context-region idx-mk))
+                           (when (or (not (eq curbuf idx-mk-buf))
+                                     ;; outside the region
+                                     (not (pos-in-region-p curpos idx-mk-region)))
+                             (throw 'break idx-mk)))))))
+    (when result
+      (recentloc-marker-table-updater result)
+      (loop repeat record-ring-len
+            do (ring-remove recentloc-command-record-ring)))))
 
 (defun recentloc-marker-table-updater (arg)
   "Update `recentloc-marker-table' with ARG. ARG for now is only
