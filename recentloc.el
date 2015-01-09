@@ -49,13 +49,17 @@ Return nil if `one-marker' is not valid."
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers."
   (loop for marker in markers
-        when (when (and (markerp marker)
-                        (buffer-live-p (marker-buffer marker)))
-               (let ((context-region (recentloc-get-context-region marker)))
-                 (with-current-buffer (marker-buffer marker)
-                   (save-excursion
-                     (goto-char (car context-region))
-                     (re-search-forward query-re (cdr context-region) t)))))
+        when (let ((mk-buf (marker-buffer marker)))
+               (when (buffer-live-p mk-buf)
+                 (or
+                  ;; buffer name matching
+                  (string-match-p query-re (buffer-name mk-buf))
+                  ;; context searching
+                  (let ((context-region (recentloc-get-context-region marker)))
+                    (with-current-buffer (marker-buffer marker)
+                      (save-excursion
+                        (goto-char (car context-region))
+                        (re-search-forward query-re (cdr context-region) t)))))))
         collect marker))
 
 (defvar recentloc-input-idle-delay 0.1
