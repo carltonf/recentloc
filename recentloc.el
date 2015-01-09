@@ -1,5 +1,7 @@
+(eval-when-compile (require 'cl))
 (require 'subr-x)
-
+(require 's)
+(require 'dash)
 
 ;;;: Generic helper functions
 ;; TODO more sanity checks
@@ -61,15 +63,32 @@ matched markers."
   (loop for marker in markers
         when (let ((mk-buf (marker-buffer marker)))
                (when (buffer-live-p mk-buf)
-                 (or
-                  ;; buffer name matching
-                  (string-match-p query-re (buffer-name mk-buf))
-                  ;; context searching
-                  (let ((context-region (recentloc-get-context-region marker)))
-                    (with-current-buffer (marker-buffer marker)
-                      (save-excursion
-                        (goto-char (car context-region))
-                        (re-search-forward query-re (cdr context-region) t)))))))
+                 (s-contains? query-re
+                              (gethash marker recentloc-marker-table)
+                              t)
+                 ;; (with-current-buffer mk-buf
+                 ;;   (or
+                 ;;    ;; buffer name matching
+                 ;;    (s-contains? query-re (buffer-name mk-buf))
+                 ;;    ;; which-func-mode
+                 ;;    (save-excursion
+                 ;;      (goto-char marker)
+                 ;;      (s-contains? query-re (or (which-function) "") t))
+                 ;;    ;; context searching
+                 ;;    (let ((context-region (recentloc-get-context-region marker)))
+                 ;;      ;; (zerop (call-process-region (car context-region) (cdr context-region)
+                 ;;      ;;                             "ag" nil nil nil
+                 ;;      ;;                             "-i" (shell-quote-argument query-re)))
+
+                 ;;      ;; (save-excursion
+                 ;;      ;;   (goto-char (car context-region))
+                 ;;      ;;   (search-forward query-re (cdr context-region) t))
+
+                 ;;      (s-contains? query-re
+                 ;;                   (gethash marker recentloc-marker-table)
+                 ;;                   t))
+                 ;;    ))
+                 ))
         collect marker))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -240,14 +259,17 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                              ;; do nothing, other than first time boostrap
                              (unless recentloc-buffer-window
                                (matched-cycle-next 0))
-                           ;; every time, the initial matched markers is the total
-                           (setq matched-markers all-markers)
                            (cond
                             ((s-blank? cur-input)
-                             (recentloc-reset-overlays)
+                             (setq matched-markers all-markers)
                              (matched-cycle-next 0))
                             ;; use white space as query string separator
                             (t
+                             ;; if not incremental search, reset markers
+                             (unless (and (s-prefix? last-input cur-input)
+                                          (-is-infix? (split-string last-input)
+                                                      (split-string cur-input)))
+                               (setq matched-markers all-markers))
                              (setq last-input cur-input)
                              (loop for single-query being the elements of (split-string cur-input)
                                    do (setq matched-markers
@@ -318,6 +340,9 @@ reset `recentloc-marker-record-ring'."
       (loop repeat record-ring-len
             do (ring-remove recentloc-marker-record-ring)))))
 
+;; (loop for mk in (hash-table-keys recentloc-marker-table)
+;;       do (puthash mk t recentloc-marker-table))
+
 (defun recentloc-marker-table-updater (arg)
   "Update `recentloc-marker-table' with ARG. ARG for now is only
 the marker, but might contain other metadata in the future."
@@ -331,14 +356,27 @@ the marker, but might contain other metadata in the future."
                (if (buffer-live-p mk-buf)
                    ;; not a new mark since an old valid marker covers it
                    (progn
-                     (setq mk-region (recentloc-get-context-region mk))
-                     (when (and (eq buf mk-buf)
-                                (pos-in-region-p pos mk-region))
-                       (setq is-new-marker nil)))
+                     (when is-new-marker
+                       (setq mk-region (recentloc-get-context-region mk))
+                       (when (and (eq buf mk-buf)
+                                  (pos-in-region-p pos mk-region))
+                         (setq is-new-marker nil)))
+                     ;; update missing key metadata
+                     ;; TODO more organized data
+                     (when (eq (gethash mk recentloc-marker-table) t)
+                       (setq mk-region (recentloc-get-context-region mk))
+                       (with-current-buffer mk-buf
+                         (save-excursion
+                           (goto-char mk)
+                           (puthash mk (s-concat (buffer-substring-no-properties (car mk-region)
+                                                                                 (cdr mk-region))
+                                                 (format "  %s  %s"
+                                                         (buffer-name)
+                                                         (or (which-function) "")))
+                                    recentloc-marker-table)))))
                  ;; clean ineffective marker
                  (remhash mk recentloc-marker-table))))
     (when is-new-marker
-      ;; TODO replace t with more useful metadata
       (puthash arg t recentloc-marker-table))))
 
 (defvar recentloc-marker-record-analyzer-idle-delay 2
@@ -357,6 +395,7 @@ non-empty.")
   "Records command execution in `command-frequency-table' hash."
   (unless (or (active-minibuffer-window)
               (helm-alive-p)
+              (derived-mode-p 'help-mode) ;ignore help mode for now (lines can be too long)
               (bound-and-true-p edebug-active)
               (bound-and-true-p company-candidates)
               ;; don't record repeated entries
