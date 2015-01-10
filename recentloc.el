@@ -237,9 +237,9 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                           (recentloc-update-overlays
                            (regexp-opt (split-string cur-input)) cur-marker))
                         (recentloc-update-mode-line-indicator
-                         (1+ cur-matched-idx) (length matched-markers)))
+                         (1+ cur-matched-idx) matched-mk-len))
+                    ;; no matched marker, only update overlays and mode-line
                     (recentloc-reset-overlays)
-                    ;; no matched marker, only update mode-line
                     (recentloc-update-mode-line-indicator 0 0))))
                (matched-cycle-previous nil (interactive) (matched-cycle-next -1)))
       (unwind-protect
@@ -256,7 +256,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                                                      (minibuffer-window))
                              (setq cur-input (s-trim (minibuffer-contents-no-properties)))))
                          (if (s-equals? last-input cur-input)
-                             ;; do nothing, other than first time boostrap
+                             ;; do nothing, other than first time bootstrap
                              (unless recentloc-buffer-window
                                (matched-cycle-next 0))
                            (cond
@@ -266,17 +266,20 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                             ;; use white space as query string separator
                             (t
                              ;; if not incremental search, reset markers
-                             (unless (and (s-prefix? last-input cur-input)
-                                          (-is-infix? (split-string last-input)
-                                                      (split-string cur-input)))
+                             ;; NOTE: empty last input is always the prefix, so skip it
+                             (unless (and (not (s-blank? last-input))
+                                          (s-prefix? last-input cur-input)
+                                          (-is-prefix? (split-string last-input)
+                                                       (split-string cur-input)))
                                (setq matched-markers all-markers))
-                             (setq last-input cur-input)
-                             (loop for single-query being the elements of (split-string cur-input)
+                             (loop for single-query in (split-string cur-input)
                                    do (setq matched-markers
                                             (recentloc-search-markers
                                              (regexp-quote single-query)
                                              matched-markers)))
-                             (matched-cycle-next 0))))))))
+                             (matched-cycle-next 0))))
+                         ;; always sync last-input regardless
+                         (setq last-input cur-input)))))
             (setq user-query-str (read-from-minibuffer "DWIM-Recentloc: " nil
                                                        (let ((keymap (make-sparse-keymap)))
                                                          (set-keymap-parent keymap minibuffer-local-map)
@@ -321,7 +324,7 @@ reset `recentloc-marker-record-ring'."
   ;; consideration since this function is run when Emacs is idle with < 3 sec.
   (let* ((record-ring-len (ring-length recentloc-marker-record-ring))
          (curbuf (current-buffer))
-         (curpos (point))         
+         (curpos (point))
          idx-cmd-mk idx-cmd idx-mk idx-mk-buf idx-mk-region
          (result (catch 'break
                    (loop for idx from 0 below record-ring-len do
@@ -395,7 +398,12 @@ non-empty.")
   "Records command execution in `command-frequency-table' hash."
   (unless (or (active-minibuffer-window)
               (helm-alive-p)
-              (derived-mode-p 'help-mode) ;ignore help mode for now (lines can be too long)
+              ;; ignore help mode for now (lines can be too long)
+              (derived-mode-p 'help-mode)
+              ;; info marker tends to lose meanings (the way `Info-mode' narrow
+              ;; regions for displaying), it needs bookmark-like marker. Ignore
+              ;; it for now.
+              (derived-mode-p 'Info-mode)
               (bound-and-true-p edebug-active)
               (bound-and-true-p company-candidates)
               ;; don't record repeated entries
