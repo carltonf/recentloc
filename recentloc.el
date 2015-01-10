@@ -33,9 +33,9 @@ the context.")
   "Return the context region (BEG . END) around POS/MARKER, i.e.
 the +/-`recentloc-context-line-num' lines around the line where
 POS/MARKER lies. POS/MARKER can be either a position or marker."
-  (with-current-buffer (if (markerp pos/marker)
-                           (marker-buffer pos/marker)
-                         (current-buffer))
+  (unless (markerp pos/marker)
+    (setq pos/marker (point-marker pos/marker)))
+  (with-current-buffer (marker-buffer pos/marker)
    (let ((min-line 1)
          (max-line (line-number-at-pos (point-max)))
          (marker-line (line-number-at-marker pos/marker))
@@ -108,11 +108,17 @@ matched markers."
   (add-hook 'pre-command-hook #'recentloc-marker-recorder t)
   (setq recentloc-marker-record-analyzer-idle-timer
         (run-with-idle-timer
-         (max recentloc-marker-record-analyzer-idle-delay 2) 'repeat
-         #'recentloc-marker-record-analyzer)))
+         (max recentloc-marker-record-analyzer-idle-delay 1) 'repeat
+         #'recentloc-marker-record-analyzer))
+  (setq recentloc-table-maintainer-idle-timer
+        (run-with-idle-timer
+         (max recentloc-table-maintainer-idle-delay 3) 'repeat
+         #'recentloc-table-maintainer)))
 
 (defun recentloc-deinitializer ()
   "Clean up `recentloc'-related settings."
+  (when recentloc-table-maintainer-idle-timer
+    (cancel-timer recentloc-table-maintainer-idle-timer))
   (when recentloc-marker-record-analyzer-idle-timer
     (cancel-timer recentloc-marker-record-analyzer-idle-timer))
   (remove-hook 'pre-command-hook #'recentloc-marker-recorder)
@@ -211,8 +217,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
 (defun recentloc-jump ()
   "Master command to jump to a position using `recentloc'"
   (interactive)
-  (let* ((all-markers (hash-table-keys recentloc-marker-table))
-         (matched-markers all-markers)
+  (let* ((matched-markers (hash-table-keys recentloc-marker-table)) ;don't cache all markers
          (cur-matched-idx 0)
          cur-marker
          timer
@@ -261,7 +266,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                                (matched-cycle-next 0))
                            (cond
                             ((s-blank? cur-input)
-                             (setq matched-markers all-markers)
+                             (setq matched-markers (hash-table-keys recentloc-marker-table))
                              (matched-cycle-next 0))
                             ;; use white space as query string separator
                             (t
@@ -271,7 +276,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                                           (s-prefix? last-input cur-input)
                                           (-is-prefix? (split-string last-input)
                                                        (split-string cur-input)))
-                               (setq matched-markers all-markers))
+                               (setq matched-markers (hash-table-keys recentloc-marker-table)))
                              (loop for single-query in (split-string cur-input)
                                    do (setq matched-markers
                                             (recentloc-search-markers
@@ -313,8 +318,15 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
 ;; Record: raw markers recorded by `recentloc-marker-recorder'
 ;; Table: parsed and managed markers, stored in `recentloc-marker-table'
 
-(defvar recentloc-marker-table (make-hash-table :test #'eq)
+(defvar recentloc-marker-table (make-hash-table :test #'eq
+                                                :size 256)
   "A table to hold all recentloc markers and their metadata.")
+
+(defvar recentloc-marker-buffer-table (make-hash-table :test #'eq
+                                                       :size 128)
+  "A table to hold buffer-marker_list pair. Mainly used for
+speeding up `recentloc-marker-record-analyzer' and
+`recentloc-marker-table-updater'.")
 
 (defun recentloc-marker-record-analyzer ()
   "Analyze `recentloc-marker-record-ring' to extract needed
@@ -343,46 +355,85 @@ reset `recentloc-marker-record-ring'."
       (loop repeat record-ring-len
             do (ring-remove recentloc-marker-record-ring)))))
 
-;; (loop for mk in (hash-table-keys recentloc-marker-table)
-;;       do (puthash mk t recentloc-marker-table))
+(defvar recentloc-marker-buffer-idle-cleaner-delta-delay-limit 5
+  "Delta Idle Delay limit used by
+`recentloc-marker-buffer-idle-cleaner' to start worker timer with
+a random delta delay.")
 
-(defun recentloc-marker-table-updater (arg)
-  "Update `recentloc-marker-table' with ARG. ARG for now is only
-the marker, but might contain other metadata in the future."
-  (let ((pos (marker-position arg))
-        (buf (marker-buffer arg))
-        (old-hash-keys (hash-table-keys recentloc-marker-table))
-        (is-new-marker t))
-    (loop for mk in old-hash-keys
-          do (let* ((mk-buf (marker-buffer mk))
-                    mk-region)
-               (if (buffer-live-p mk-buf)
-                   ;; not a new mark since an old valid marker covers it
-                   (progn
-                     (when is-new-marker
-                       (setq mk-region (recentloc-get-context-region mk))
-                       (when (and (eq buf mk-buf)
-                                  (pos-in-region-p pos mk-region))
-                         (setq is-new-marker nil)))
-                     ;; update missing key metadata
-                     ;; TODO more organized data
-                     (when (eq (gethash mk recentloc-marker-table) t)
-                       (setq mk-region (recentloc-get-context-region mk))
-                       (with-current-buffer mk-buf
-                         (save-excursion
-                           (goto-char mk)
-                           (puthash mk (s-concat (buffer-substring-no-properties (car mk-region)
-                                                                                 (cdr mk-region))
-                                                 (format "  %s  %s"
-                                                         (buffer-name)
-                                                         (or (which-function) "")))
-                                    recentloc-marker-table)))))
-                 ;; clean ineffective marker
-                 (remhash mk recentloc-marker-table))))
+(defun recentloc-marker-buffer-idle-cleaner (buf)
+  "Remove BUF from `recentloc-marker-buffer-table' and all
+related markers from `recentloc-marker-table'. The function runs
+an one-shot idle timer to do the real work. The delta delay used
+is randomized to create a \"balanced\" workload. The delta limit
+is `recentloc-marker-buffer-idle-cleaner-delta-delay-limit'.
+
+Supposed to used by other timers."
+  (cl-flet ((cleanup-buf-mks (buf)
+                             (loop for mk in (gethash buf recentloc-marker-buffer-table)
+                                   do (remhash mk recentloc-marker-table))
+                             (remhash buf recentloc-marker-buffer-table)))
+    (run-with-idle-timer
+     (time-add (or (current-idle-time) 0)
+               (seconds-to-time (1+ (random recentloc-marker-buffer-idle-cleaner-delta-delay-limit))))
+     nil
+     #'cleanup-buf-mks buf)))
+
+(defun recentloc-marker-table-updater (marker)
+  "Update `recentloc-marker-table' with MARKER."
+  (let* ((pos (marker-position marker))
+         region
+         (buf (marker-buffer marker))
+         (buf-mk-lst (gethash buf recentloc-marker-buffer-table))
+         (is-new-marker t))
+    (if (buffer-live-p buf)
+        (loop for mk in buf-mk-lst
+              until (when (pos-in-region-p pos (recentloc-get-context-region mk))
+                      (setq is-new-marker nil)
+                      t))               ;ugly hack to have loop break...
+      ;; buffer is no longer valid
+      (recentloc-marker-buffer-idle-cleaner buf))
     (when is-new-marker
-      (puthash arg t recentloc-marker-table))))
+      (with-current-buffer buf
+        (setq region (recentloc-get-context-region marker))
+        (save-excursion
+          (goto-char pos)
+          (puthash marker (s-concat
+                           (format "'%s' '%s' "
+                                   (buffer-name)
+                                   (or (which-function) ""))
+                           (buffer-substring-no-properties (car region)
+                                                           (cdr region)))
+                   recentloc-marker-table)))
+      ;; TODO sorting the buf-mk-lst
+      (puthash buf (cons marker buf-mk-lst)
+               recentloc-marker-buffer-table))))
 
-(defvar recentloc-marker-record-analyzer-idle-delay 2
+(defvar recentloc-table-maintainer-idle-delay 3
+  "The idle time before starting `recentloc-table-maintainer'.")
+
+(defvar recentloc-table-maintainer-idle-timer nil
+  "Idle timer for `recentloc-table-maintainer'")
+
+(defun recentloc-table-maintainer ()
+  "An idle timer to maintain `recentloc' data, includes:
+`recentloc-marker-table'
+`recentloc-marker-buffer-table'.
+
+The responsibility of the maintainer is:
+1. Clean up all markers associated with dead/gone buffers.
+2. TODO update metadata to speed up searching.
+
+NOTE: this function shouldn't take too long and hard tasks ought
+  to split up."
+  (let ((buf-keys (hash-table-keys recentloc-marker-buffer-table))
+        ;; (mk-keys (hash-table-keys recentloc-marker-table))
+        )
+    ;; validate buffers
+    (loop for buf in buf-keys
+          unless (buffer-live-p buf)
+          do (recentloc-marker-buffer-idle-cleaner buf))))
+
+(defvar recentloc-marker-record-analyzer-idle-delay 1
   "The idle time needed for analyzer to generate markers
 according to history.")
 
