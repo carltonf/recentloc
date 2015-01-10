@@ -2,6 +2,7 @@
 (require 'subr-x)
 (require 's)
 (require 'dash)
+(require 'eieio)
 
 ;;;: Generic helper functions
 ;; TODO more sanity checks
@@ -61,11 +62,10 @@ POS/MARKER lies. POS/MARKER can be either a position or marker."
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers."
   (loop for marker in markers
-        when (let ((mk-buf (marker-buffer marker)))
+        when (let ((mk-buf (marker-buffer marker))
+                   (mk-meta (gethash marker recentloc-marker-table)))
                (when (buffer-live-p mk-buf)
-                 (s-contains? query-re
-                              (gethash marker recentloc-marker-table)
-                              t)
+                 (s-contains? query-re (oref mk-meta :context) t)
                  ;; (with-current-buffer mk-buf
                  ;;   (or
                  ;;    ;; buffer name matching
@@ -420,6 +420,63 @@ Supposed to used by other timers."
      nil
      #'cleanup-buf-mks buf)))
 
+(defvar recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit 5
+  "Delta Idle Delay limit used by
+`recentloc-marker-buffer-metadata-idle-updater' to start worker
+timer with a random delta delay.")
+
+(defun recentloc-marker-buffer-metadata-idle-updater (buf)
+  "Update the metadata of all markers associated with BUF in
+`recentloc-marker-table' if necessary."
+  (loop for mk in (gethash buf recentloc-marker-buffer-table)
+        unless (let* ((mk-meta (gethash mk recentloc-marker-table))
+                      (cur-pos (marker-position mk))
+                      (old-pos (oref mk-meta :pos)))
+                 (= cur-pos old-pos))
+        do (run-with-idle-timer
+            (time-add (or (current-idle-time) (seconds-to-time 0))
+                      (seconds-to-time
+                       (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
+            nil
+            #'recentloc--marker-table-update-metadata mk)))
+
+(defclass recentloc-marker-metadata ()
+  ((context :initarg :context
+            :initform ""
+            :type string
+            :documentation
+            "Context strings cached to speed up searching.")
+   (pos :initarg :pos
+        :initform 0
+        :type number
+        :documentation
+        "Old position in the marker buffer. Used to compare with
+        `marker-position' to indicate context change."))
+  "Metadata in `recentloc-marker-table'.")
+
+(defun recentloc--marker-table-update-metadata (marker)
+  "Update metadata in `recentloc-marker-table' for MARKER."
+  (let ((pos (marker-position marker))
+        (buf (marker-buffer marker))
+        region
+        (metadata (recentloc-marker-metadata "metadata")))
+    (if (not (buffer-live-p buf))
+        (recentloc-marker-buffer-idle-cleaner buf)
+      ;; update metadata
+      (with-current-buffer buf
+        (setq region (recentloc-get-context-region marker))
+        (save-excursion
+          (goto-char pos)
+          (oset metadata :pos pos)
+          (oset metadata
+                :context (s-concat
+                          (format "'%s' '%s' "
+                                  (buffer-name)
+                                  (or (which-function) ""))
+                          (buffer-substring-no-properties (car region)
+                                                          (cdr region))))))
+      (puthash marker metadata recentloc-marker-table))))
+
 (defun recentloc-marker-table-updater (marker)
   "Update `recentloc-marker-table' with MARKER."
   (let* ((pos (marker-position marker))
@@ -435,17 +492,7 @@ Supposed to used by other timers."
       ;; buffer is no longer valid
       (recentloc-marker-buffer-idle-cleaner buf))
     (when is-new-marker
-      (with-current-buffer buf
-        (setq region (recentloc-get-context-region marker))
-        (save-excursion
-          (goto-char pos)
-          (puthash marker (s-concat
-                           (format "'%s' '%s' "
-                                   (buffer-name)
-                                   (or (which-function) ""))
-                           (buffer-substring-no-properties (car region)
-                                                           (cdr region)))
-                   recentloc-marker-table)))
+      (recentloc--marker-table-update-metadata marker)
       ;; TODO sorting the buf-mk-lst
       (puthash buf (cons marker buf-mk-lst)
                recentloc-marker-buffer-table))))
@@ -467,13 +514,13 @@ The responsibility of the maintainer is:
 
 NOTE: this function shouldn't take too long and hard tasks ought
   to split up."
-  (let ((buf-keys (hash-table-keys recentloc-marker-buffer-table))
-        ;; (mk-keys (hash-table-keys recentloc-marker-table))
-        )
+  (let ((buf-keys (hash-table-keys recentloc-marker-buffer-table)))
     ;; validate buffers
     (loop for buf in buf-keys
-          unless (buffer-live-p buf)
-          do (recentloc-marker-buffer-idle-cleaner buf))))
+          do (if (not (buffer-live-p buf))
+                 (recentloc-marker-buffer-idle-cleaner buf)
+               ;; try to update metadata
+               (recentloc-marker-buffer-metadata-idle-updater buf)))))
 
 (defvar recentloc-marker-record-analyzer-idle-delay 1
   "The idle time needed for analyzer to generate markers
