@@ -58,38 +58,29 @@ POS/MARKER lies. POS/MARKER can be either a position or marker."
        (setq end (line-end-position)))
      (cons beg end))))
 
-(defun recentloc-search-markers (query-re markers)
+(defun recentloc-search-markers (start-marker query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers."
-  (loop for marker in markers
-        when (let ((mk-buf (marker-buffer marker))
-                   (mk-meta (gethash marker recentloc-marker-table)))
-               (when (buffer-live-p mk-buf)
-                 (s-contains? query-re (oref mk-meta :context) t)
-                 ;; (with-current-buffer mk-buf
-                 ;;   (or
-                 ;;    ;; buffer name matching
-                 ;;    (s-contains? query-re (buffer-name mk-buf))
-                 ;;    ;; which-func-mode
-                 ;;    (save-excursion
-                 ;;      (goto-char marker)
-                 ;;      (s-contains? query-re (or (which-function) "") t))
-                 ;;    ;; context searching
-                 ;;    (let ((context-region (recentloc-get-context-region marker)))
-                 ;;      ;; (zerop (call-process-region (car context-region) (cdr context-region)
-                 ;;      ;;                             "ag" nil nil nil
-                 ;;      ;;                             "-i" (shell-quote-argument query-re)))
-
-                 ;;      ;; (save-excursion
-                 ;;      ;;   (goto-char (car context-region))
-                 ;;      ;;   (search-forward query-re (cdr context-region) t))
-
-                 ;;      (s-contains? query-re
-                 ;;                   (gethash marker recentloc-marker-table)
-                 ;;                   t))
-                 ;;    ))
-                 ))
-        collect marker))
+  (let* ((start-buf (marker-buffer start-marker))
+         (start-region (recentloc-get-context-region start-marker))
+         (matched-markers
+          (loop for marker in markers
+                when (let ((mk-buf (marker-buffer marker))
+                           (mk-meta (gethash marker recentloc-marker-table)))
+                       (when (and (buffer-live-p mk-buf)
+                                  ;; filter out markers too close to the start point
+                                  (not (and (eq start-buf mk-buf)
+                                            (pos-in-region-p (marker-position marker)
+                                                             start-region))))
+                         (s-contains? query-re (oref mk-meta :context) t)))
+                collect marker)))
+    (setq matched-markers
+          (sort* matched-markers
+                 (lambda (m1 m2)
+                   (let ((m1-meta (gethash m1 recentloc-marker-table))
+                         (m2-meta (gethash m2 recentloc-marker-table)))
+                     (time-less-p (oref m1-meta :timestamp)
+                                  (oref m2-meta :timestamp))))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;: Main mode facility
@@ -233,17 +224,16 @@ MODE is a symbol defines the action takes:
           cur-marker)
       (if (not (zerop matched-mk-len))
           (progn
-            (setq cur-matched-idx (mod (case mode
-                                         ('reset 0)
-                                         ('next (1+ cur-matched-idx))
-                                         ('prev (1- cur-matched-idx))
-                                         ;; other mode code is not defined, no
-                                         ;; cycling happens
-                                         (t
-                                          (warn "'%s' is invalid mode code!"
-                                                (pp-to-string mode))
-                                          cur-matched-idx))
-                                       matched-mk-len)
+            (setq cur-matched-idx (case mode
+                                    ('reset 0)
+                                    ('next (ring-plus1 cur-matched-idx matched-mk-len))
+                                    ('prev (ring-minus1 cur-matched-idx matched-mk-len))
+                                    ;; other mode code is not defined, no
+                                    ;; cycling happens
+                                    (t
+                                     (warn "'%s' is invalid mode code!"
+                                           (pp-to-string mode))
+                                     cur-matched-idx))
                   cur-marker (nth cur-matched-idx matched-markers))
             (recentloc-display-marker-simple cur-marker)
             ;; TODO add a length limit?
@@ -269,7 +259,8 @@ MODE is a symbol defines the action takes:
   "Master command to jump to a position using `recentloc'"
   (interactive)
   ;; don't cache all markers as multiple timers might invalidate the cache
-  (let* ((matched-markers (hash-table-keys recentloc-marker-table))
+  (let* ((start-marker (point-marker))
+         (matched-markers (hash-table-keys recentloc-marker-table))
          chosen-marker
          timer
          ;; input should be trimed before stored
@@ -309,9 +300,9 @@ MODE is a symbol defines the action takes:
                                (setq matched-markers (hash-table-keys recentloc-marker-table)))
                              (loop for single-query in (split-string cur-input)
                                    do (setq matched-markers
-                                            (recentloc-search-markers
-                                             (regexp-quote single-query)
-                                             matched-markers)))
+                                            (recentloc-search-markers start-marker
+                                                                      (regexp-quote single-query)
+                                                                      matched-markers)))
                              (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
                          ;; always sync last-input regardless
                          (setq last-input cur-input)))))
@@ -451,51 +442,96 @@ timer with a random delta delay.")
         :type number
         :documentation
         "Old position in the marker buffer. Used to compare with
-        `marker-position' to indicate context change."))
+        `marker-position' to indicate context change.")
+   (timestamp :initarg :timestamp
+              :initform (seconds-to-time 0)
+              :type (satisfies listp)
+              :documentation
+              "Last visited timestamp, format is the same as `current-time'")
+   (count     :initarg :count
+              :initform 1
+              :type number
+              :documentation
+              "The number of visits.")
+   (autotag   :initarg :autotag
+              :initform (make-ring 8)
+              :type (satisfies ring-p)
+              :documentation
+              "Tokenized string list that have been used to
+              switch to this marker")
+   ;; TODO needs a way to auto-update this in OO way
+   (score     :initarg :score
+              :initform 0
+              :type number
+              :documentation
+              "Quantified priority in the search result. Used for
+              sorting."))
   "Metadata in `recentloc-marker-table'.")
 
-(defun recentloc--marker-table-update-metadata (marker)
-  "Update metadata in `recentloc-marker-table' for MARKER."
+(defun recentloc--marker-table-update-metadata (marker &optional not-context
+                                                       timestamp update-count-p
+                                                       autotag)
+  "Update metadata in `recentloc-marker-table' for MARKER.
+Default to update context and pos only if NOT-CONTEXT is unset or
+nil. If TIMESTAMP, UPDATE-COUNT-P or AUTOTAG is non-nil update
+timestamp, count and autotag respectively."
   (let ((pos (marker-position marker))
         (buf (marker-buffer marker))
         region
         (metadata (recentloc-marker-metadata "metadata")))
     (if (not (buffer-live-p buf))
         (recentloc-marker-buffer-idle-cleaner buf)
-      ;; update metadata
-      (with-current-buffer buf
-        (setq region (recentloc-get-context-region marker))
-        (save-excursion
-          (goto-char pos)
-          (oset metadata :pos pos)
-          (oset metadata
-                :context (s-concat
-                          (format "'%s' '%s' "
-                                  (buffer-name)
-                                  (or (which-function) ""))
-                          (buffer-substring-no-properties (car region)
-                                                          (cdr region))))))
+      ;; update context and pos
+      (unless not-context
+        (with-current-buffer buf
+          (setq region (recentloc-get-context-region marker))
+          (save-excursion
+            (goto-char pos)
+            (oset metadata :pos pos)
+            (oset metadata
+                  :context (s-concat
+                            (format "'%s' '%s' "
+                                    (buffer-name)
+                                    (or (which-function) ""))
+                            (buffer-substring-no-properties (car region)
+                                                            (cdr region)))))))
+      (when timestamp
+        (oset metadata :timestamp timestamp))
+      (when update-count-p
+        (oset metadata :count (1+ (oref metadata :count))))
+      ;; TODO needs a OO way of updating the field s.t. the details of ring data
+      ;; structure is hidden from here
+      ;; (when autotag
+      ;;   (oset metadata :autotag))
       (puthash marker metadata recentloc-marker-table))))
 
 (defun recentloc-marker-table-updater (marker)
-  "Update `recentloc-marker-table' with MARKER."
+  "Update `recentloc-marker-table' with MARKER. Usually MARKER is
+from `recentloc-marker-record-ring'."
   (let* ((pos (marker-position marker))
          region
          (buf (marker-buffer marker))
          (buf-mk-lst (gethash buf recentloc-marker-buffer-table))
          (is-new-marker t))
     (if (buffer-live-p buf)
-        (loop for mk in buf-mk-lst
-              until (when (pos-in-region-p pos (recentloc-get-context-region mk))
-                      (setq is-new-marker nil)
-                      t))               ;ugly hack to have loop break...
+        (progn
+          (loop for mk in buf-mk-lst
+                until (when (pos-in-region-p pos (recentloc-get-context-region mk))
+                        ;; reset marker to old one, so we can update some metadata
+                        (setq marker mk)
+                        (setq is-new-marker nil)
+                        t))             ;ugly hack to have loop break...
+          (if is-new-marker
+              (progn
+                (recentloc--marker-table-update-metadata marker nil
+                                                         (current-time))
+                ;; TODO sorting the buf-mk-lst
+                (puthash buf (cons marker buf-mk-lst)
+                         recentloc-marker-buffer-table))
+            ;; an old marker but needs to update timestamp only (not context)
+            (recentloc--marker-table-update-metadata marker t (current-time))))
       ;; buffer is no longer valid
-      (recentloc-marker-buffer-idle-cleaner buf))
-    (when is-new-marker
-      (recentloc--marker-table-update-metadata marker)
-      ;; TODO sorting the buf-mk-lst
-      (puthash buf (cons marker buf-mk-lst)
-               recentloc-marker-buffer-table))))
+      (recentloc-marker-buffer-idle-cleaner buf))))
 
 (defvar recentloc-table-maintainer-idle-delay 3
   "The idle time before starting `recentloc-table-maintainer'.")
@@ -568,3 +604,43 @@ non-empty.")
     ;;             (pp-to-string (ring-elements recentloc-marker-record-ring))
     ;;             "\n")))
     ))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;: Test area.
+;;; Useful code for debugging, copy to other buffers to use them.
+
+;;: reboot recentloc-marker-buffer-table
+;; (progn
+;;   (loop for mk in (hash-table-keys recentloc-marker-table)
+;;         do (let* ((mk-buf (marker-buffer mk))
+;;                   (buf-mk-lst (gethash mk-buf recentloc-marker-buffer-table
+;;                                        nil)))
+;;              (when (buffer-live-p mk-buf)
+;;                (puthash mk-buf (add-to-list 'buf-mk-lst mk nil #'eq)
+;;                         recentloc-marker-buffer-table))))
+;;   recentloc-marker-buffer-table)
+
+;; ;;; reboot recentloc-marker-table
+;; (loop for mk in (hash-table-keys recentloc-marker-table)
+;;       do (let ((mk-region (recentloc-get-context-region mk))
+;;                (mk-buf (marker-buffer mk)))
+;;            (recentloc--marker-table-update-metadata mk)))
+
+;; ;;; unbound a symbol and check it
+;; (let ((sym 'recentloc-command-record-ring))
+;;   (makunbound sym)
+;;   (boundp sym))
+
+;; ;;; fix timer
+;; (setq timer-idle-list
+;;       (remove-if (lambda (timer)
+;;                    (eq 200000
+;;                        (aref timer 3)))
+;;                  timer-idle-list))
+
+;; (recentloc-initializer)
+;; (recentloc-deinitializer)
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
