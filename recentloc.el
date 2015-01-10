@@ -213,41 +213,71 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
         )
     (setq recentloc-mode-line-indicator nil)))
 
+;;; TODO make this mode related
+(defvar recentloc-jump-alive-p nil
+  "Indicator whether `recentloc-jump' is active.")
+
+(lexical-let ((cur-matched-idx 0))
+  (defun recentloc-jump-cycle-matched-markers (matched-markers cur-input mode)
+    "A function used in `recentloc-jump' to cycle
+through MATCHED-MARKERS under the CUR-INPUT. An internal counter
+is used.
+
+MODE is a symbol defines the action takes: 
+'reset: shows the first matched marker, reset the internal counter.
+'next: cycle to the next one.
+'prev: cycle to the previous one."
+    (unless recentloc-jump-alive-p
+      (error "Should only be called while `recentloc-jump' is alive."))
+    (let ((matched-mk-len (length matched-markers))
+          cur-marker)
+      (if (not (zerop matched-mk-len))
+          (progn
+            (setq cur-matched-idx (mod (case mode
+                                         ('reset 0)
+                                         ('next (1+ cur-matched-idx))
+                                         ('prev (1- cur-matched-idx))
+                                         ;; other mode code is not defined, no
+                                         ;; cycling happens
+                                         (t
+                                          (warn "'%s' is invalid mode code!"
+                                                (pp-to-string mode))
+                                          cur-matched-idx))
+                                       matched-mk-len)
+                  cur-marker (nth cur-matched-idx matched-markers))
+            (recentloc-display-marker-simple cur-marker)
+            ;; TODO add a length limit?
+            (if (s-blank? cur-input)
+                (recentloc-reset-overlays)
+              (recentloc-update-overlays
+               (regexp-opt (split-string cur-input)) cur-marker))
+            (recentloc-update-mode-line-indicator
+             (1+ cur-matched-idx) matched-mk-len))
+        ;; no matched marker, only update overlays and mode-line
+        (recentloc-reset-overlays)
+        (recentloc-update-mode-line-indicator 0 0))))
+  ;;
+  (defun recentloc-jump-cycle-chosen-marker (matched-markers)
+    "Helper function to return the currently chosen marker"
+    (nth cur-matched-idx matched-markers)))
+
 ;;; main command
+(defvar recentloc-debug-data nil
+  "Helper variable that collects some debug data.")
+
 (defun recentloc-jump ()
   "Master command to jump to a position using `recentloc'"
   (interactive)
-  (let* ((matched-markers (hash-table-keys recentloc-marker-table)) ;don't cache all markers
-         (cur-matched-idx 0)
-         cur-marker
+  ;; don't cache all markers as multiple timers might invalidate the cache
+  (let* ((matched-markers (hash-table-keys recentloc-marker-table))
+         chosen-marker
          timer
          ;; input should be trimed before stored
          (cur-input "") (last-input "")
          user-query-str)
-    (cl-flet* ((matched-cycle-next
-                (&optional arg) (interactive "p")
-                (let ((matched-mk-len (length matched-markers)))
-                  (if (not (zerop matched-mk-len))
-                      (progn
-                        (setq cur-matched-idx (if (zerop arg)
-                                                  0
-                                                (mod (funcall (if (> arg 0) #'1+ #'1-)
-                                                              cur-matched-idx)
-                                                     matched-mk-len))
-                              cur-marker (nth cur-matched-idx matched-markers))
-                        (recentloc-display-marker-simple cur-marker)
-                        ;; TODO add a length limit?
-                        (if (s-blank? cur-input)
-                            (recentloc-reset-overlays)
-                          (recentloc-update-overlays
-                           (regexp-opt (split-string cur-input)) cur-marker))
-                        (recentloc-update-mode-line-indicator
-                         (1+ cur-matched-idx) matched-mk-len))
-                    ;; no matched marker, only update overlays and mode-line
-                    (recentloc-reset-overlays)
-                    (recentloc-update-mode-line-indicator 0 0))))
-               (matched-cycle-previous nil (interactive) (matched-cycle-next -1)))
-      (unwind-protect
+    (unwind-protect
+        (progn
+          (setq recentloc-jump-alive-p t)
           (minibuffer-with-setup-hook
               (lambda ()
                 (setq timer
@@ -263,11 +293,11 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                          (if (s-equals? last-input cur-input)
                              ;; do nothing, other than first time bootstrap
                              (unless recentloc-buffer-window
-                               (matched-cycle-next 0))
+                               (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
                            (cond
                             ((s-blank? cur-input)
                              (setq matched-markers (hash-table-keys recentloc-marker-table))
-                             (matched-cycle-next 0))
+                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
                             ;; use white space as query string separator
                             (t
                              ;; if not incremental search, reset markers
@@ -282,32 +312,44 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
                                             (recentloc-search-markers
                                              (regexp-quote single-query)
                                              matched-markers)))
-                             (matched-cycle-next 0))))
+                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
                          ;; always sync last-input regardless
                          (setq last-input cur-input)))))
-            (setq user-query-str (read-from-minibuffer "DWIM-Recentloc: " nil
-                                                       (let ((keymap (make-sparse-keymap)))
-                                                         (set-keymap-parent keymap minibuffer-local-map)
-                                                         (define-key keymap (kbd "C-n") #'matched-cycle-next)
-                                                         (define-key keymap (kbd "C-p") #'matched-cycle-previous)
-                                                         keymap))))
-        ;; clean up timer first
-        (when timer (cancel-timer timer))
-        ;; if user confirms selection
-        (when user-query-str
-          ;; note in case of cancel in minibuffer reading, the following in
-          ;; this level doesn't execute
-          (when (markerp cur-marker)
-            (unless (loop for win being the elements of (window-list)
-                          when (eq (window-buffer win) (marker-buffer cur-marker))
-                          do (select-window win))
-              (switch-to-buffer (marker-buffer cur-marker)))
-            (goto-char cur-marker)
-            (recenter)))
-        ;; clean up `recentloc' states
-        (setq recentloc-buffer-window nil)
-        (recentloc-reset-overlays)
-        (recentloc-update-mode-line-indicator)))))
+            (setq user-query-str (read-from-minibuffer
+                                  "DWIM-Recentloc: " nil
+                                  (let ((keymap (make-sparse-keymap)))
+                                    (set-keymap-parent keymap minibuffer-local-map)
+                                    (define-key keymap (kbd "C-n")
+                                      (lambda () (interactive)
+                                        (recentloc-jump-cycle-matched-markers matched-markers cur-input 'next)))
+                                    (define-key keymap (kbd "C-p")
+                                      (lambda () (interactive)
+                                        (recentloc-jump-cycle-matched-markers matched-markers cur-input 'prev)))
+                                    (define-key keymap (kbd "C-d")
+                                      (lambda () (interactive)
+                                        (setq recentloc-debug-data
+                                              (cons (recentloc-jump-cycle-chosen-marker matched-markers)
+                                                    recentloc-debug-data))))
+                                    keymap)))))
+      ;; clean up timer first
+      (when timer (cancel-timer timer))
+      ;; if user confirms selection
+      (when user-query-str
+        ;; note in case of cancel in minibuffer reading, the following in
+        ;; this level doesn't execute
+        (setq chosen-marker (recentloc-jump-cycle-chosen-marker matched-markers))
+        (when (markerp chosen-marker)
+          (unless (loop for win in (window-list)
+                        when (eq (window-buffer win) (marker-buffer chosen-marker))
+                        do (select-window win))
+            (switch-to-buffer (marker-buffer chosen-marker)))
+          (goto-char chosen-marker)
+          (recenter)))
+      ;; clean up `recentloc' states
+      (setq recentloc-buffer-window nil)
+      (recentloc-reset-overlays)
+      (recentloc-update-mode-line-indicator)
+      (setq recentloc-jump-alive-p nil))))
 
 ;;; TODO move this to user settings
 (global-set-key (kbd "C-z m") #'recentloc-jump)
@@ -373,7 +415,7 @@ Supposed to used by other timers."
                                    do (remhash mk recentloc-marker-table))
                              (remhash buf recentloc-marker-buffer-table)))
     (run-with-idle-timer
-     (time-add (or (current-idle-time) 0)
+     (time-add (or (current-idle-time) (seconds-to-time 0))
                (seconds-to-time (1+ (random recentloc-marker-buffer-idle-cleaner-delta-delay-limit))))
      nil
      #'cleanup-buf-mks buf)))
@@ -445,16 +487,24 @@ according to history.")
 like (command-symbol . marker). This is ring is initialized to be
 non-empty.")
 
+(defvar recentloc-marker-recorder-ignore-buffers "\\`[ *]"
+  "Regexp matching the names of buffers to ignore.")
+
 (defun recentloc-marker-recorder ()
   "Records command execution in `command-frequency-table' hash."
   (unless (or (active-minibuffer-window)
-              (helm-alive-p)
+              ;; (helm-alive-p)
               ;; ignore help mode for now (lines can be too long)
-              (derived-mode-p 'help-mode)
+              ;; (derived-mode-p 'help-mode)
               ;; info marker tends to lose meanings (the way `Info-mode' narrow
               ;; regions for displaying), it needs bookmark-like marker. Ignore
               ;; it for now.
-              (derived-mode-p 'Info-mode)
+              ;; (derived-mode-p 'Info-mode)
+              ;; follow the buffer listing tradition to ignore certain buffers
+              (let ((buf-name (buffer-name)))
+                (and (not (s-equals? buf-name "*scratch*"))
+                     (not (s-equals? buf-name "*scratch-text*"))
+                     (string-match recentloc-marker-recorder-ignore-buffers buf-name)))
               (bound-and-true-p edebug-active)
               (bound-and-true-p company-candidates)
               ;; don't record repeated entries
