@@ -419,17 +419,51 @@ timer with a random delta delay.")
 (defun recentloc-marker-buffer-metadata-idle-updater (buf)
   "Update the metadata of all markers associated with BUF in
 `recentloc-marker-table' if necessary."
-  (loop for mk in (gethash buf recentloc-marker-buffer-table)
-        unless (let* ((mk-meta (gethash mk recentloc-marker-table))
-                      (cur-pos (marker-position mk))
-                      (old-pos (oref mk-meta :pos)))
-                 (= cur-pos old-pos))
-        do (run-with-idle-timer
-            (time-add (or (current-idle-time) (seconds-to-time 0))
-                      (seconds-to-time
-                       (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
-            nil
-            #'recentloc--marker-table-update-metadata mk)))
+  (let ((buf-mk-lst (gethash buf recentloc-marker-buffer-table)))
+    (setq buf-mk-lst
+          (loop for curmk = (car buf-mk-lst) then (car buf-mk-lst)
+                until (null curmk)
+                do (let* ((rest-buf-mk-lst (cdr buf-mk-lst))
+                          (curmk-region (recentloc-get-context-region curmk))
+                          (curmk-meta (gethash curmk recentloc-marker-table))
+                          ;; timestamp
+                          (curmk-time (oref curmk-meta :timestamp))
+                          (new-curmk-time curmk-time)
+                          mk-time
+                          ;; position and context
+                          (curmk-pos (marker-position curmk))
+                          (old-curmk-pos (oref curmk-meta :pos)))
+                     ;; iteration
+                     (setq buf-mk-lst (cdr buf-mk-lst))
+                     ;; check the rest of markers behind `curmk'
+                     (loop for mk in rest-buf-mk-lst
+                           while (pos-in-region-p (marker-position mk)
+                                                  curmk-region)
+                           ;; merging markers that are too close, use the most
+                           ;; up-to-date timestamp. (This happens as the user
+                           ;; editing buffers)
+                           do (progn
+                                (setq mk-time (oref (gethash mk recentloc-marker-table)
+                                                    :timestamp))
+                                (when (time-less-p curmk-time mk-time)
+                                  (setq new-curmk-time mk-time))
+                                (setq buf-mk-lst (cdr buf-mk-lst))
+                                (remhash mk recentloc-marker-table)))
+                     ;; all-in-one metadata update
+                     (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
+                                            new-curmk-time))
+                           (pos/context-update-p (not (= curmk-pos old-curmk-pos))))
+                       (when (or new-timestamp pos/context-update-p)
+                         (run-with-idle-timer
+                          (time-add
+                           (or (current-idle-time) (seconds-to-time 0))
+                           (seconds-to-time
+                            (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
+                          nil
+                          #'recentloc--marker-table-update-metadata
+                          curmk (not pos/context-update-p) new-timestamp))))
+                collect curmk))
+    (puthash buf buf-mk-lst recentloc-marker-buffer-table)))
 
 (defclass recentloc-marker-metadata ()
   ((context :initarg :context
@@ -471,14 +505,17 @@ timer with a random delta delay.")
 (defun recentloc--marker-table-update-metadata (marker &optional not-context
                                                        timestamp update-count-p
                                                        autotag)
-  "Update metadata in `recentloc-marker-table' for MARKER.
+  "Update metadata in `recentloc-marker-table' for MARKER. If
+MARKER is not in the table yet, add it.
+
 Default to update context and pos only if NOT-CONTEXT is unset or
 nil. If TIMESTAMP, UPDATE-COUNT-P or AUTOTAG is non-nil update
 timestamp, count and autotag respectively."
   (let ((pos (marker-position marker))
         (buf (marker-buffer marker))
         region
-        (metadata (recentloc-marker-metadata "metadata")))
+        (metadata (or (gethash marker recentloc-marker-table)
+                      (recentloc-marker-metadata "metadata"))))
     (if (not (buffer-live-p buf))
         (recentloc-marker-buffer-idle-cleaner buf)
       ;; update context and pos
@@ -512,24 +549,29 @@ from `recentloc-marker-record-ring'."
          region
          (buf (marker-buffer marker))
          (buf-mk-lst (gethash buf recentloc-marker-buffer-table))
-         (is-new-marker t))
+         ;; marker index
+         (mk-idx 0)
+         (new-marker-p t))
     (if (buffer-live-p buf)
         (progn
           (loop for mk in buf-mk-lst
-                until (when (pos-in-region-p pos (recentloc-get-context-region mk))
-                        ;; reset marker to old one, so we can update some metadata
-                        (setq marker mk)
-                        (setq is-new-marker nil)
-                        t))             ;ugly hack to have loop break...
-          (if is-new-marker
-              (progn
-                (recentloc--marker-table-update-metadata marker nil
-                                                         (current-time))
-                ;; TODO sorting the buf-mk-lst
-                (puthash buf (cons marker buf-mk-lst)
-                         recentloc-marker-buffer-table))
-            ;; an old marker but needs to update timestamp only (not context)
-            (recentloc--marker-table-update-metadata marker t (current-time))))
+                until (if (pos-in-region-p pos (recentloc-get-context-region mk))
+                          ;;: old marker, update timestamp only (not context)
+                          (progn
+                            (setq new-marker-p nil)
+                            (recentloc--marker-table-update-metadata mk t (current-time))
+                            t)
+                        ;;: new marker
+                        ;; the first MK after MARKER and not cover MARKER, and
+                        ;; thus MARKER is new and should be inserted just before
+                        ;; MK. (buf-mk-lst should be sorted)
+                        (when (> (marker-position mk) pos)
+                          t))
+                do (setq mk-idx (1+ mk-idx)))
+          (when new-marker-p
+            (recentloc--marker-table-update-metadata marker nil (current-time))
+            (setq buf-mk-lst (-insert-at mk-idx marker buf-mk-lst))
+            (puthash buf buf-mk-lst recentloc-marker-buffer-table)))
       ;; buffer is no longer valid
       (recentloc-marker-buffer-idle-cleaner buf))))
 
@@ -610,22 +652,84 @@ non-empty.")
 ;;;: Test area.
 ;;; Useful code for debugging, copy to other buffers to use them.
 
-;;: reboot recentloc-marker-buffer-table
-;; (progn
-;;   (loop for mk in (hash-table-keys recentloc-marker-table)
-;;         do (let* ((mk-buf (marker-buffer mk))
-;;                   (buf-mk-lst (gethash mk-buf recentloc-marker-buffer-table
-;;                                        nil)))
-;;              (when (buffer-live-p mk-buf)
-;;                (puthash mk-buf (add-to-list 'buf-mk-lst mk nil #'eq)
-;;                         recentloc-marker-buffer-table))))
-;;   recentloc-marker-buffer-table)
+(defun recentloc-data-reset ()
+  "Reset all `recentloc' metadata. This includes the metadata
+part in `recentloc-marker-table' and all of
+`recentloc-marker-buffer-table'.
 
-;; ;;; reboot recentloc-marker-table
-;; (loop for mk in (hash-table-keys recentloc-marker-table)
-;;       do (let ((mk-region (recentloc-get-context-region mk))
-;;                (mk-buf (marker-buffer mk)))
-;;            (recentloc--marker-table-update-metadata mk)))
+Mainly used when the data structures are changed during the
+development.
+
+More about data structure clarity than efficiency. Try to make
+every block self-contained (block as defined by ';;:')."
+
+  ;;: regenerate the metadata part of `recentloc-marker-table', only context for
+  ;; now
+  (loop for mk in (hash-table-keys recentloc-marker-table)
+        do (recentloc--marker-table-update-metadata mk nil
+                                                    (seconds-to-time 0)))
+
+  ;;: Regenerate `recentloc-marker-buffer-table' from markers in
+  ;;`recentloc-marker-table'.
+  (progn
+    (clrhash recentloc-marker-buffer-table)
+    (loop for mk in (hash-table-keys recentloc-marker-table)
+          do (let* ((mk-buf (marker-buffer mk))
+                    (buf-mk-lst (gethash mk-buf recentloc-marker-buffer-table
+                                         nil)))
+               (if (and (buffer-live-p mk-buf)
+                        (not (string-match recentloc-marker-recorder-ignore-buffers
+                                           (buffer-name mk-buf))))
+                   (puthash mk-buf (add-to-list 'buf-mk-lst mk nil #'eq)
+                            recentloc-marker-buffer-table)
+                 ;; remove buffer and marker
+                 (remhash mk-buf recentloc-marker-buffer-table) ;safe sake
+                 (remhash mk recentloc-marker-table)))))
+
+  ;;: sorting `recentloc-marker-buffer-table' in position-ascending order
+  (let ((sorted-table (make-hash-table :test #'eq
+                                       :size 128)))
+    (maphash (lambda (buf buf-mk-lst)
+               (puthash buf (sort* buf-mk-lst
+                                   (lambda (mk1 mk2)
+                                     (< (marker-position mk1)
+                                        (marker-position mk2))))
+                        sorted-table))
+             recentloc-marker-buffer-table)
+    (setq recentloc-marker-buffer-table sorted-table))
+
+  ;;: sanitizing marker buffer table as done by
+  ;;`recentloc-marker-buffer-metadata-idle-updater'. In case of merging markers,
+  ;;update the timestamp in `recentloc-marker-table'
+  (let ((sanitized-table (make-hash-table :test #'eq
+                                          :size 128)))
+    (maphash (lambda (buf buf-mk-lst)
+               (setq buf-mk-lst
+                     (loop for curmk = (car buf-mk-lst) then (car buf-mk-lst)
+                           until (null curmk)
+                           do (let* ((curmk-region (recentloc-get-context-region curmk))
+                                     (curmk-time (oref (gethash curmk recentloc-marker-table)
+                                                       :timestamp))
+                                     (new-curmk-time curmk-time)
+                                     mk-time
+                                     (rest-buf-mk-lst (cdr buf-mk-lst)))
+                                (setq buf-mk-lst (cdr buf-mk-lst))
+                                (loop for mk in rest-buf-mk-lst
+                                      while (pos-in-region-p (marker-position mk)
+                                                             curmk-region)
+                                      do (progn
+                                           (setq mk-time (oref (gethash mk recentloc-marker-table)
+                                                               :timestamp))
+                                           (when (time-less-p curmk-time mk-time)
+                                             (setq new-curmk-time mk-time))
+                                           ;; is it safe to do this?
+                                           (setq buf-mk-lst (cdr buf-mk-lst))))
+                                (when (time-less-p curmk-time new-curmk-time)
+                                  (recentloc--marker-table-update-metadata curmk t new-curmk-time)))
+                           collect curmk))
+               (puthash buf buf-mk-lst sanitized-table))
+             recentloc-marker-buffer-table)
+    (setq recentloc-marker-buffer-table sanitized-table)))
 
 ;; ;;; unbound a symbol and check it
 ;; (let ((sym 'recentloc-command-record-ring))
