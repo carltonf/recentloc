@@ -30,16 +30,14 @@ cons (beg . end)."
   "The number of lines around the marker that is considered to be
 the context.")
 
-(defun recentloc-get-context-region (pos/marker)
-  "Return the context region (BEG . END) around POS/MARKER, i.e.
+(defun recentloc-get-context-region (marker)
+  "Return the context region (BEG . END) around MARKER, i.e.
 the +/-`recentloc-context-line-num' lines around the line where
-POS/MARKER lies. POS/MARKER can be either a position or marker."
-  (unless (markerp pos/marker)
-    (setq pos/marker (point-marker pos/marker)))
-  (with-current-buffer (marker-buffer pos/marker)
+MARKER lies."
+  (with-current-buffer (marker-buffer marker)
    (let ((min-line 1)
          (max-line (line-number-at-pos (point-max)))
-         (marker-line (line-number-at-marker pos/marker))
+         (marker-line (line-number-at-marker marker))
          beg-line end-line
          beg end)
      (setq beg-line (if (< (- marker-line min-line) recentloc-context-line-num)
@@ -58,29 +56,28 @@ POS/MARKER lies. POS/MARKER can be either a position or marker."
        (setq end (line-end-position)))
      (cons beg end))))
 
-(defun recentloc-search-markers (start-marker query-re markers)
+(defun recentloc-search-markers (query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
-matched markers."
-  (let* ((start-buf (marker-buffer start-marker))
-         (start-region (recentloc-get-context-region start-marker))
-         (matched-markers
+matched markers. If QUERY-RE is empty, it's considered all match. "
+  (let* ((matched-markers
           (loop for marker in markers
                 when (let ((mk-buf (marker-buffer marker))
                            (mk-meta (gethash marker recentloc-marker-table)))
-                       (when (and (buffer-live-p mk-buf)
-                                  ;; filter out markers too close to the start point
-                                  (not (and (eq start-buf mk-buf)
-                                            (pos-in-region-p (marker-position marker)
-                                                             start-region))))
-                         (s-contains? query-re (oref mk-meta :context) t)))
+                       (when (buffer-live-p mk-buf)
+                         (or (s-blank? query-re)
+                             (s-contains? query-re (oref mk-meta :context)))))
                 collect marker)))
-    (setq matched-markers
-          (sort* matched-markers
-                 (lambda (m1 m2)
-                   (let ((m1-meta (gethash m1 recentloc-marker-table))
-                         (m2-meta (gethash m2 recentloc-marker-table)))
-                     (time-less-p (oref m1-meta :timestamp)
-                                  (oref m2-meta :timestamp))))))))
+    matched-markers))
+
+(defun recentloc--sort-matched-markers (matched-markers)
+  "Sorting MATCHED-MARKERS. Use this function before displaying
+any `recentloc' candidates to get sane results."
+  (sort* matched-markers
+         (lambda (m1 m2)
+           (let ((m1-meta (gethash m1 recentloc-marker-table))
+                 (m2-meta (gethash m2 recentloc-marker-table)))
+             (not (time-less-p (oref m1-meta :timestamp)
+                               (oref m2-meta :timestamp)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;: Main mode facility
@@ -259,88 +256,102 @@ MODE is a symbol defines the action takes:
   "Master command to jump to a position using `recentloc'"
   (interactive)
   ;; don't cache all markers as multiple timers might invalidate the cache
-  (let* ((start-marker (point-marker))
-         (matched-markers (hash-table-keys recentloc-marker-table))
+  (let* ((cursor-buffer (current-buffer))
+         (cursor-region (recentloc-get-context-region (point-marker)))
+         matched-markers
          chosen-marker
          timer
          ;; input should be trimed before stored
          (cur-input "") (last-input "")
          user-query-str)
-    (unwind-protect
-        (progn
-          (setq recentloc-jump-alive-p t)
-          (minibuffer-with-setup-hook
-              (lambda ()
-                (setq timer
-                      (run-with-idle-timer
-                       (max recentloc-input-idle-delay 0.2) 'repeat
-                       (lambda ()
-                         ;; TODO add guard if previous actions are still
-                         ;; ongoing
-                         (save-selected-window
-                           (with-selected-window (or (active-minibuffer-window)
-                                                     (minibuffer-window))
-                             (setq cur-input (s-trim (minibuffer-contents-no-properties)))))
-                         (if (s-equals? last-input cur-input)
-                             ;; do nothing, other than first time bootstrap
-                             (unless recentloc-buffer-window
+    (cl-flet ((all-sane-markers ()
+               "Return all markers that are considered sane, i.e. exclude the marker enclose the current cursor."
+               (loop for mk in (hash-table-keys recentloc-marker-table)
+                     unless (and (eq cursor-buffer (marker-buffer mk))
+                                 (pos-in-region-p (marker-position mk)
+                                                  cursor-region))
+                     collect mk)))
+      (setq matched-markers (all-sane-markers))
+      (unwind-protect
+          (progn
+            (setq recentloc-jump-alive-p t)
+            (minibuffer-with-setup-hook
+                (lambda ()
+                  (setq timer
+                        (run-with-idle-timer
+                         (max recentloc-input-idle-delay 0.2) 'repeat
+                         (lambda ()
+                           ;; TODO add guard if previous actions are still
+                           ;; ongoing
+                           (save-selected-window
+                             (with-selected-window (or (active-minibuffer-window)
+                                                       (minibuffer-window))
+                               (setq cur-input (s-trim (minibuffer-contents-no-properties)))))
+                           (if (s-equals? last-input cur-input)
+                               ;; do nothing, other than first time bootstrap
+                               (unless recentloc-buffer-window
+                                 (setq matched-markers (recentloc--sort-matched-markers matched-markers))
+                                 (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
+                             (cond
+                              ((s-blank? cur-input)
+                               (setq matched-markers (all-sane-markers))
+                               (setq matched-markers (recentloc--sort-matched-markers matched-markers))
                                (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
-                           (cond
-                            ((s-blank? cur-input)
-                             (setq matched-markers (hash-table-keys recentloc-marker-table))
-                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
-                            ;; use white space as query string separator
-                            (t
-                             ;; if not incremental search, reset markers
-                             ;; NOTE: empty last input is always the prefix, so skip it
-                             (unless (and (not (s-blank? last-input))
-                                          (s-prefix? last-input cur-input)
-                                          (-is-prefix? (split-string last-input)
-                                                       (split-string cur-input)))
-                               (setq matched-markers (hash-table-keys recentloc-marker-table)))
-                             (loop for single-query in (split-string cur-input)
-                                   do (setq matched-markers
-                                            (recentloc-search-markers start-marker
-                                                                      (regexp-quote single-query)
-                                                                      matched-markers)))
-                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
-                         ;; always sync last-input regardless
-                         (setq last-input cur-input)))))
-            (setq user-query-str (read-from-minibuffer
-                                  "DWIM-Recentloc: " nil
-                                  (let ((keymap (make-sparse-keymap)))
-                                    (set-keymap-parent keymap minibuffer-local-map)
-                                    (define-key keymap (kbd "C-n")
-                                      (lambda () (interactive)
-                                        (recentloc-jump-cycle-matched-markers matched-markers cur-input 'next)))
-                                    (define-key keymap (kbd "C-p")
-                                      (lambda () (interactive)
-                                        (recentloc-jump-cycle-matched-markers matched-markers cur-input 'prev)))
-                                    (define-key keymap (kbd "C-d")
-                                      (lambda () (interactive)
-                                        (setq recentloc-debug-data
-                                              (cons (recentloc-jump-cycle-chosen-marker matched-markers)
-                                                    recentloc-debug-data))))
-                                    keymap)))))
-      ;; clean up timer first
-      (when timer (cancel-timer timer))
-      ;; if user confirms selection
-      (when user-query-str
-        ;; note in case of cancel in minibuffer reading, the following in
-        ;; this level doesn't execute
-        (setq chosen-marker (recentloc-jump-cycle-chosen-marker matched-markers))
-        (when (markerp chosen-marker)
-          (unless (loop for win in (window-list)
-                        when (eq (window-buffer win) (marker-buffer chosen-marker))
-                        do (select-window win))
-            (switch-to-buffer (marker-buffer chosen-marker)))
-          (goto-char chosen-marker)
-          (recenter)))
-      ;; clean up `recentloc' states
-      (setq recentloc-buffer-window nil)
-      (recentloc-reset-overlays)
-      (recentloc-update-mode-line-indicator)
-      (setq recentloc-jump-alive-p nil))))
+                              ;; use white space as query string separator
+                              (t
+                               ;; if not incremental search, reset markers
+                               ;; NOTE: empty last input is always the prefix, so skip it
+                               (unless (and (not (s-blank? last-input))
+                                            (s-prefix? last-input cur-input)
+                                            (-is-prefix? (split-string last-input)
+                                                         (split-string cur-input)))
+                                 (setq matched-markers (all-sane-markers)))
+                               (loop for single-query in (split-string cur-input)
+                                     do (setq matched-markers
+                                              (recentloc-search-markers (regexp-quote single-query)
+                                                                        matched-markers)))
+                               (setq matched-markers (recentloc--sort-matched-markers matched-markers))
+                               (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
+                           ;; always sync last-input regardless
+                           (setq last-input cur-input)))))
+              (setq user-query-str (read-from-minibuffer
+                                    "DWIM-Recentloc: " nil
+                                    (let ((keymap (make-sparse-keymap)))
+                                      (set-keymap-parent keymap minibuffer-local-map)
+                                      (define-key keymap (kbd "C-n")
+                                        (lambda () (interactive)
+                                          (recentloc-jump-cycle-matched-markers matched-markers cur-input 'next)))
+                                      (define-key keymap (kbd "C-p")
+                                        (lambda () (interactive)
+                                          (recentloc-jump-cycle-matched-markers matched-markers cur-input 'prev)))
+                                      (define-key keymap (kbd "C-d")
+                                        (lambda () (interactive)
+                                          (setq recentloc-debug-data
+                                                (cons (recentloc-jump-cycle-chosen-marker matched-markers)
+                                                      recentloc-debug-data))))
+                                      keymap)))))
+        ;; clean up timer first
+        (when timer (cancel-timer timer))
+        ;; if user confirms selection
+        (when user-query-str
+          ;; note in case of cancel in minibuffer reading, the following in
+          ;; this level doesn't execute
+          (setq chosen-marker (recentloc-jump-cycle-chosen-marker matched-markers))
+          (when (markerp chosen-marker)
+            (unless (loop for win in (window-list)
+                          when (eq (window-buffer win) (marker-buffer chosen-marker))
+                          do (select-window win))
+              (switch-to-buffer (marker-buffer chosen-marker)))
+            ;; jump to the first matched string (better than goto the forgotten marker position)
+            (let ((region (recentloc-get-context-region chosen-marker)))
+              (goto-char (car region))
+              (re-search-forward (regexp-opt (split-string cur-input)) (cdr region))
+              (recenter))))
+        ;; clean up `recentloc' states
+        (setq recentloc-buffer-window nil)
+        (recentloc-reset-overlays)
+        (recentloc-update-mode-line-indicator)
+        (setq recentloc-jump-alive-p nil)))))
 
 ;;; TODO move this to user settings
 (global-set-key (kbd "C-z m") #'recentloc-jump)
@@ -421,47 +432,48 @@ timer with a random delta delay.")
 `recentloc-marker-table' if necessary."
   (let ((buf-mk-lst (gethash buf recentloc-marker-buffer-table)))
     (setq buf-mk-lst
-          (loop for curmk = (car buf-mk-lst) then (car buf-mk-lst)
-                until (null curmk)
-                do (let* ((rest-buf-mk-lst (cdr buf-mk-lst))
-                          (curmk-region (recentloc-get-context-region curmk))
-                          (curmk-meta (gethash curmk recentloc-marker-table))
-                          ;; timestamp
-                          (curmk-time (oref curmk-meta :timestamp))
-                          (new-curmk-time curmk-time)
-                          mk-time
-                          ;; position and context
-                          (curmk-pos (marker-position curmk))
-                          (old-curmk-pos (oref curmk-meta :pos)))
+          (loop for curmk in buf-mk-lst
+                by (lambda (rest-buf-mk-lst)
                      ;; iteration
-                     (setq buf-mk-lst (cdr buf-mk-lst))
-                     ;; check the rest of markers behind `curmk'
-                     (loop for mk in rest-buf-mk-lst
-                           while (pos-in-region-p (marker-position mk)
-                                                  curmk-region)
-                           ;; merging markers that are too close, use the most
-                           ;; up-to-date timestamp. (This happens as the user
-                           ;; editing buffers)
-                           do (progn
-                                (setq mk-time (oref (gethash mk recentloc-marker-table)
-                                                    :timestamp))
-                                (when (time-less-p curmk-time mk-time)
-                                  (setq new-curmk-time mk-time))
-                                (setq buf-mk-lst (cdr buf-mk-lst))
-                                (remhash mk recentloc-marker-table)))
-                     ;; all-in-one metadata update
-                     (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
-                                            new-curmk-time))
-                           (pos/context-update-p (not (= curmk-pos old-curmk-pos))))
-                       (when (or new-timestamp pos/context-update-p)
-                         (run-with-idle-timer
-                          (time-add
-                           (or (current-idle-time) (seconds-to-time 0))
-                           (seconds-to-time
-                            (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
-                          nil
-                          #'recentloc--marker-table-update-metadata
-                          curmk (not pos/context-update-p) new-timestamp))))
+                     (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
+                     (let* ((curmk-region (recentloc-get-context-region curmk))
+                            (curmk-meta (gethash curmk recentloc-marker-table))
+                            ;; timestamp
+                            (curmk-time (oref curmk-meta :timestamp))
+                            (new-curmk-time curmk-time)
+                            mk-time
+                            ;; position and context
+                            (curmk-pos (marker-position curmk))
+                            (old-curmk-pos (oref curmk-meta :pos)))
+                       ;; check the rest of markers behind `curmk'
+                       (loop for mk in rest-buf-mk-lst
+                             while (pos-in-region-p (marker-position mk)
+                                                    curmk-region)
+                             ;; merging markers that are too close, use the most
+                             ;; up-to-date timestamp. (This happens as the user
+                             ;; editing buffers)
+                             do (progn
+                                  (setq mk-time (oref (gethash mk recentloc-marker-table)
+                                                      :timestamp))
+                                  (when (time-less-p curmk-time mk-time)
+                                    (setq new-curmk-time mk-time))
+                                  (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
+                                  (remhash mk recentloc-marker-table)))
+                       ;; all-in-one metadata update
+                       (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
+                                              new-curmk-time))
+                             (pos/context-update-p (not (= curmk-pos old-curmk-pos))))
+                         (when (or new-timestamp pos/context-update-p)
+                           (run-with-idle-timer
+                            (time-add
+                             (or (current-idle-time) (seconds-to-time 0))
+                             (seconds-to-time
+                              (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
+                            nil
+                            #'recentloc--marker-table-update-metadata
+                            curmk (not pos/context-update-p) new-timestamp))))
+                     ;; remaining buffer marker list
+                     rest-buf-mk-lst)
                 collect curmk))
     (puthash buf buf-mk-lst recentloc-marker-buffer-table)))
 
