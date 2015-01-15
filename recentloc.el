@@ -1,3 +1,10 @@
+;;; Notions:
+;;;
+;;; Regmks: Region Markers, a pair of markers that designate a region, which CAR
+;;; be the at the starting point of the region (beginning-of-line) and the CDR
+;;; be the ending point of the region (end-of-line).
+
+
 (eval-when-compile (require 'cl))
 (require 'subr-x)
 (require 's)
@@ -30,31 +37,39 @@ cons (beg . end)."
   "The number of lines around the marker that is considered to be
 the context.")
 
+(defun recentloc-get-context-regmks (marker)
+  "Return the context Regmks around MARKER, i.e.
+  the +/-`recentloc-context-line-num' lines around the line where
+  MARKER lies."
+  (with-current-buffer (marker-buffer marker)
+
+    (let ((min-line 1)
+          (max-line (line-number-at-pos (point-max)))
+          (marker-line (line-number-at-marker marker))
+          begm endm)
+      (setq beg-line (if (< (- marker-line min-line) recentloc-context-line-num)
+                         min-line
+                       (- marker-line recentloc-context-line-num)))
+      (setq end-line (if (< (- max-line marker-line) recentloc-context-line-num)
+                         max-line
+                       (+ marker-line recentloc-context-line-num)))
+      ;; (cons beg-line end-line)
+      (save-excursion
+        (goto-char (point-min))
+        (beginning-of-line beg-line)
+        (setq begm (point-marker))
+        (goto-char (point-min))
+        (end-of-line end-line)
+        (setq endm (point-marker)))
+      (cons begm endm))))
+
 (defun recentloc-get-context-region (marker)
   "Return the context region (BEG . END) around MARKER, i.e.
 the +/-`recentloc-context-line-num' lines around the line where
 MARKER lies."
-  (with-current-buffer (marker-buffer marker)
-   (let ((min-line 1)
-         (max-line (line-number-at-pos (point-max)))
-         (marker-line (line-number-at-marker marker))
-         beg-line end-line
-         beg end)
-     (setq beg-line (if (< (- marker-line min-line) recentloc-context-line-num)
-                        min-line
-                      (- marker-line recentloc-context-line-num)))
-     (setq end-line (if (< (- max-line marker-line) recentloc-context-line-num)
-                        max-line
-                      (+ marker-line recentloc-context-line-num)))
-     ;; (cons beg-line end-line)
-     (save-excursion
-       (goto-char (point-min))
-       (forward-line (1- beg-line))
-       (setq beg (line-beginning-position))
-       (goto-char (point-min))
-       (forward-line (1- end-line))
-       (setq end (line-end-position)))
-     (cons beg end))))
+  (let ((regmks (recentloc-get-context-regmks marker)))
+    (cons (marker-position (car regmks))
+          (marker-position (cdr regmks)))))
 
 (defun recentloc-search-markers (query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
@@ -211,7 +226,7 @@ IDX or TCOUNT is nil, reset `recentloc-mode-line-indicator'."
 through MATCHED-MARKERS under the CUR-INPUT. An internal counter
 is used.
 
-MODE is a symbol defines the action takes: 
+MODE is a symbol defines the action takes:
 'reset: shows the first matched marker, reset the internal counter.
 'next: cycle to the next one.
 'prev: cycle to the previous one."
@@ -434,7 +449,6 @@ timer with a random delta delay.")
     (setq buf-mk-lst
           (loop for curmk in buf-mk-lst
                 by (lambda (rest-buf-mk-lst)
-                     ;; iteration
                      (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
                      (let* ((curmk-region (recentloc-get-context-region curmk))
                             (curmk-meta (gethash curmk recentloc-marker-table))
@@ -443,8 +457,8 @@ timer with a random delta delay.")
                             (new-curmk-time curmk-time)
                             mk-time
                             ;; position and context
-                            (curmk-pos (marker-position curmk))
-                            (old-curmk-pos (oref curmk-meta :pos)))
+                            (old-curmk-reglen (oref curmk-meta :reglen))
+                            (old-curmk-regmks (oref curmk-meta :regmks)))
                        ;; check the rest of markers behind `curmk'
                        (loop for mk in rest-buf-mk-lst
                              while (pos-in-region-p (marker-position mk)
@@ -462,7 +476,9 @@ timer with a random delta delay.")
                        ;; all-in-one metadata update
                        (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
                                               new-curmk-time))
-                             (pos/context-update-p (not (= curmk-pos old-curmk-pos))))
+                             (pos/context-update-p (not (= old-curmk-reglen
+                                                           (- (cdr old-curmk-regmks)
+                                                              (car old-curmk-regmks))))))
                          (when (or new-timestamp pos/context-update-p)
                            (run-with-idle-timer
                             (time-add
@@ -483,17 +499,24 @@ timer with a random delta delay.")
             :type string
             :documentation
             "Context strings cached to speed up searching.")
-   (pos :initarg :pos
-        :initform 0
-        :type number
-        :documentation
-        "Old position in the marker buffer. Used to compare with
-        `marker-position' to indicate context change.")
    (timestamp :initarg :timestamp
               :initform (seconds-to-time 0)
               :type (satisfies listp)
               :documentation
               "Last visited timestamp, format is the same as `current-time'")
+   (regmks :initarg :regmks
+           :initform (nil . nil)
+           :type (satisfies consp)
+           :documentation
+           "A cons cell. Region Markers around the Marker. Used
+           to calculate region length.")
+   (reglen :initarg :reglen
+           :initform 0
+           :type number
+           :documentation
+           "A number calculated from `:regmks'. Used to indicate
+          whether this region has been changed and thus grant an
+          update in the cache. ")
    (count     :initarg :count
               :initform 1
               :type number
@@ -523,27 +546,26 @@ MARKER is not in the table yet, add it.
 Default to update context and pos only if NOT-CONTEXT is unset or
 nil. If TIMESTAMP, UPDATE-COUNT-P or AUTOTAG is non-nil update
 timestamp, count and autotag respectively."
-  (let ((pos (marker-position marker))
-        (buf (marker-buffer marker))
-        region
+  (let ((buf (marker-buffer marker))
+        regmks beg end
         (metadata (or (gethash marker recentloc-marker-table)
                       (recentloc-marker-metadata "metadata"))))
     (if (not (buffer-live-p buf))
         (recentloc-marker-buffer-idle-cleaner buf)
-      ;; update context and pos
+      ;; update context and regmks
       (unless not-context
         (with-current-buffer buf
-          (setq region (recentloc-get-context-region marker))
-          (save-excursion
-            (goto-char pos)
-            (oset metadata :pos pos)
-            (oset metadata
-                  :context (s-concat
-                            (format "'%s' '%s' "
-                                    (buffer-name)
-                                    (or (which-function) ""))
-                            (buffer-substring-no-properties (car region)
-                                                            (cdr region)))))))
+          (setq regmks (recentloc-get-context-regmks marker)
+                beg (marker-position (car regmks))
+                end (marker-position (cdr regmks)))
+          (oset metadata :regmks regmks)
+          (oset metadata :reglen (- end beg))
+          (oset metadata
+                :context (s-concat
+                          (format "'%s' '%s' "
+                                  (buffer-name)
+                                  (or (which-function) ""))
+                          (buffer-substring-no-properties beg end)))))
       (when timestamp
         (oset metadata :timestamp timestamp))
       (when update-count-p
@@ -678,8 +700,8 @@ every block self-contained (block as defined by ';;:')."
   ;;: regenerate the metadata part of `recentloc-marker-table', only context for
   ;; now
   (loop for mk in (hash-table-keys recentloc-marker-table)
-        do (recentloc--marker-table-update-metadata mk nil
-                                                    (seconds-to-time 0)))
+        do (recentloc--marker-table-update-metadata
+            mk nil (oref (gethash mk recentloc-marker-table) :timestamp)))
 
   ;;: Regenerate `recentloc-marker-buffer-table' from markers in
   ;;`recentloc-marker-table'.
