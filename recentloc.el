@@ -381,7 +381,7 @@ MODE is a symbol defines the action takes:
                                                 :size 256)
   "A table to hold all recentloc markers and their metadata.")
 
-(defvar recentloc-marker-buffer-table (make-hash-table :test #'eq
+(defvar recentloc-buffer-markers-table (make-hash-table :test #'eq
                                                        :size 128)
   "A table to hold buffer-marker_list pair. Mainly used for
 speeding up `recentloc-marker-record-analyzer' and
@@ -420,7 +420,7 @@ reset `recentloc-marker-record-ring'."
 a random delta delay.")
 
 (defun recentloc-marker-buffer-idle-cleaner (buf)
-  "Remove BUF from `recentloc-marker-buffer-table' and all
+  "Remove BUF from `recentloc-buffer-markers-table' and all
 related markers from `recentloc-marker-table'. The function runs
 an one-shot idle timer to do the real work. The delta delay used
 is randomized to create a \"balanced\" workload. The delta limit
@@ -428,9 +428,9 @@ is `recentloc-marker-buffer-idle-cleaner-delta-delay-limit'.
 
 Supposed to used by other timers."
   (cl-flet ((cleanup-buf-mks (buf)
-                             (loop for mk in (gethash buf recentloc-marker-buffer-table)
+                             (loop for mk in (gethash buf recentloc-buffer-markers-table)
                                    do (remhash mk recentloc-marker-table))
-                             (remhash buf recentloc-marker-buffer-table)))
+                             (remhash buf recentloc-buffer-markers-table)))
     (run-with-idle-timer
      (time-add (or (current-idle-time) (seconds-to-time 0))
                (seconds-to-time (1+ (random recentloc-marker-buffer-idle-cleaner-delta-delay-limit))))
@@ -445,7 +445,7 @@ timer with a random delta delay.")
 (defun recentloc-marker-buffer-metadata-idle-updater (buf)
   "Update the metadata of all markers associated with BUF in
 `recentloc-marker-table' if necessary."
-  (let ((buf-mk-lst (gethash buf recentloc-marker-buffer-table)))
+  (let ((buf-mk-lst (gethash buf recentloc-buffer-markers-table)))
     (setq buf-mk-lst
           (loop for curmk in buf-mk-lst
                 by (lambda (rest-buf-mk-lst)
@@ -491,7 +491,7 @@ timer with a random delta delay.")
                      ;; remaining buffer marker list
                      rest-buf-mk-lst)
                 collect curmk))
-    (puthash buf buf-mk-lst recentloc-marker-buffer-table)))
+    (puthash buf buf-mk-lst recentloc-buffer-markers-table)))
 
 (defclass recentloc-marker-metadata ()
   ((context :initarg :context
@@ -582,7 +582,7 @@ from `recentloc-marker-record-ring'."
   (let* ((pos (marker-position marker))
          region
          (buf (marker-buffer marker))
-         (buf-mk-lst (gethash buf recentloc-marker-buffer-table))
+         (buf-mk-lst (gethash buf recentloc-buffer-markers-table))
          ;; marker index
          (mk-idx 0)
          (new-marker-p t))
@@ -605,7 +605,7 @@ from `recentloc-marker-record-ring'."
           (when new-marker-p
             (recentloc--marker-table-update-metadata marker nil (current-time))
             (setq buf-mk-lst (-insert-at mk-idx marker buf-mk-lst))
-            (puthash buf buf-mk-lst recentloc-marker-buffer-table)))
+            (puthash buf buf-mk-lst recentloc-buffer-markers-table)))
       ;; buffer is no longer valid
       (recentloc-marker-buffer-idle-cleaner buf))))
 
@@ -618,7 +618,7 @@ from `recentloc-marker-record-ring'."
 (defun recentloc-table-maintainer ()
   "An idle timer to maintain `recentloc' data, includes:
 `recentloc-marker-table'
-`recentloc-marker-buffer-table'.
+`recentloc-buffer-markers-table'.
 
 The responsibility of the maintainer is:
 1. Clean up all markers associated with dead/gone buffers.
@@ -626,7 +626,7 @@ The responsibility of the maintainer is:
 
 NOTE: this function shouldn't take too long and hard tasks ought
   to split up."
-  (let ((buf-keys (hash-table-keys recentloc-marker-buffer-table)))
+  (let ((buf-keys (hash-table-keys recentloc-buffer-markers-table)))
     ;; validate buffers
     (loop for buf in buf-keys
           do (if (not (buffer-live-p buf))
@@ -689,7 +689,7 @@ non-empty.")
 (defun recentloc-data-reset ()
   "Reset all `recentloc' metadata. This includes the metadata
 part in `recentloc-marker-table' and all of
-`recentloc-marker-buffer-table'.
+`recentloc-buffer-markers-table'.
 
 Mainly used when the data structures are changed during the
 development.
@@ -703,24 +703,24 @@ every block self-contained (block as defined by ';;:')."
         do (recentloc--marker-table-update-metadata
             mk nil (oref (gethash mk recentloc-marker-table) :timestamp)))
 
-  ;;: Regenerate `recentloc-marker-buffer-table' from markers in
+  ;;: Regenerate `recentloc-buffer-markers-table' from markers in
   ;;`recentloc-marker-table'.
   (progn
-    (clrhash recentloc-marker-buffer-table)
+    (clrhash recentloc-buffer-markers-table)
     (loop for mk in (hash-table-keys recentloc-marker-table)
           do (let* ((mk-buf (marker-buffer mk))
-                    (buf-mk-lst (gethash mk-buf recentloc-marker-buffer-table
+                    (buf-mk-lst (gethash mk-buf recentloc-buffer-markers-table
                                          nil)))
                (if (and (buffer-live-p mk-buf)
                         (not (string-match recentloc-marker-recorder-ignore-buffers
                                            (buffer-name mk-buf))))
                    (puthash mk-buf (add-to-list 'buf-mk-lst mk nil #'eq)
-                            recentloc-marker-buffer-table)
+                            recentloc-buffer-markers-table)
                  ;; remove buffer and marker
-                 (remhash mk-buf recentloc-marker-buffer-table) ;safe sake
+                 (remhash mk-buf recentloc-buffer-markers-table) ;safe sake
                  (remhash mk recentloc-marker-table)))))
 
-  ;;: sorting `recentloc-marker-buffer-table' in position-ascending order
+  ;;: sorting `recentloc-buffer-markers-table' in position-ascending order
   (let ((sorted-table (make-hash-table :test #'eq
                                        :size 128)))
     (maphash (lambda (buf buf-mk-lst)
@@ -729,8 +729,8 @@ every block self-contained (block as defined by ';;:')."
                                      (< (marker-position mk1)
                                         (marker-position mk2))))
                         sorted-table))
-             recentloc-marker-buffer-table)
-    (setq recentloc-marker-buffer-table sorted-table))
+             recentloc-buffer-markers-table)
+    (setq recentloc-buffer-markers-table sorted-table))
 
   ;;: sanitizing marker buffer table as done by
   ;;`recentloc-marker-buffer-metadata-idle-updater'. In case of merging markers,
@@ -762,8 +762,8 @@ every block self-contained (block as defined by ';;:')."
                                   (recentloc--marker-table-update-metadata curmk t new-curmk-time)))
                            collect curmk))
                (puthash buf buf-mk-lst sanitized-table))
-             recentloc-marker-buffer-table)
-    (setq recentloc-marker-buffer-table sanitized-table)))
+             recentloc-buffer-markers-table)
+    (setq recentloc-buffer-markers-table sanitized-table)))
 
 ;; ;;; unbound a symbol and check it
 ;; (let ((sym 'recentloc-command-record-ring))
