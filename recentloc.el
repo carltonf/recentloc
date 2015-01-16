@@ -41,27 +41,16 @@ the context.")
   "Return the context Regmks around MARKER, i.e.
   the +/-`recentloc-context-line-num' lines around the line where
   MARKER lies."
-  (with-current-buffer (marker-buffer marker)
-
-    (let ((min-line 1)
-          (max-line (line-number-at-pos (point-max)))
-          (marker-line (line-number-at-marker marker))
-          begm endm)
-      (setq beg-line (if (< (- marker-line min-line) recentloc-context-line-num)
-                         min-line
-                       (- marker-line recentloc-context-line-num)))
-      (setq end-line (if (< (- max-line marker-line) recentloc-context-line-num)
-                         max-line
-                       (+ marker-line recentloc-context-line-num)))
-      ;; (cons beg-line end-line)
-      (save-excursion
-        (goto-char (point-min))
-        (beginning-of-line beg-line)
-        (setq begm (point-marker))
-        (goto-char (point-min))
-        (end-of-line end-line)
-        (setq endm (point-marker)))
-      (cons begm endm))))
+  (let (begm endm)
+    (save-excursion
+      (set-buffer (marker-buffer marker))
+      (goto-char marker)
+      (beginning-of-line (- recentloc-context-line-num))
+      (setq begm (point-marker))
+      (goto-char marker)
+      (end-of-line recentloc-context-line-num)
+      (setq endm (point-marker)))
+    (cons begm endm)))
 
 (defun recentloc-get-context-region (marker)
   "Return the context region (BEG . END) around MARKER, i.e.
@@ -390,29 +379,34 @@ speeding up `recentloc-marker-record-analyzer' and
 (defun recentloc-marker-record-analyzer ()
   "Analyze `recentloc-marker-record-ring' to extract needed
 useful markers to `recentloc-marker-table'. NOTE this function also
-reset `recentloc-marker-record-ring'."
+reset `recentloc-marker-record-ring'.
+
+Reverse look through the `recentloc-marker-record-ring' and
+compare it with current position. If a \"significant different\"
+marker is found, record this marker."
   ;; TODO consider longer history, currently we only take the tip into
   ;; consideration since this function is run when Emacs is idle with < 3 sec.
-  (let* ((record-ring-len (ring-length recentloc-marker-record-ring))
-         (curbuf (current-buffer))
-         (curpos (point))
-         idx-cmd-mk idx-cmd idx-mk idx-mk-buf idx-mk-region
-         (result (catch 'break
-                   (loop for idx from 0 below record-ring-len do
-                         (setq idx-cmd-mk (ring-ref recentloc-marker-record-ring idx)
-                               idx-cmd (car idx-cmd-mk)
-                               idx-mk (cdr idx-cmd-mk)
-                               idx-mk-buf (marker-buffer idx-mk))
-                         (when (buffer-live-p idx-mk-buf)
-                           (setq idx-mk-region (recentloc-get-context-region idx-mk))
-                           (when (or (not (eq curbuf idx-mk-buf))
-                                     ;; outside the region
-                                     (not (pos-in-region-p curpos idx-mk-region)))
-                             (throw 'break idx-mk)))))))
-    (when result
-      (recentloc-marker-table-updater result)
-      (loop repeat record-ring-len
-            do (ring-remove recentloc-marker-record-ring)))))
+  (unless (active-minibuffer-window)    ;ignore minibuffer
+    (let* ((record-ring-len (ring-length recentloc-marker-record-ring))
+           (curbuf (current-buffer))
+           (curpos (point))
+           idx-cmd-mk idx-cmd idx-mk idx-mk-buf idx-mk-region
+           (result (catch 'break
+                     (loop for idx from 0 below record-ring-len do
+                           (setq idx-cmd-mk (ring-ref recentloc-marker-record-ring idx)
+                                 idx-cmd (car idx-cmd-mk)
+                                 idx-mk (cdr idx-cmd-mk)
+                                 idx-mk-buf (marker-buffer idx-mk))
+                           (when (buffer-live-p idx-mk-buf)
+                             (setq idx-mk-region (recentloc-get-context-region idx-mk))
+                             (when (or (not (eq curbuf idx-mk-buf))
+                                       ;; outside the region
+                                       (not (pos-in-region-p curpos idx-mk-region)))
+                               (throw 'break idx-mk)))))))
+      (when result
+        (recentloc-marker-table-updater result)
+        (loop repeat record-ring-len
+              do (ring-remove recentloc-marker-record-ring))))))
 
 (defvar recentloc-marker-buffer-idle-cleaner-delta-delay-limit 5
   "Delta Idle Delay limit used by
@@ -437,7 +431,7 @@ Supposed to used by other timers."
      nil
      #'cleanup-buf-mks buf)))
 
-(defvar recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit 5
+(defvar recentloc-marker-buffer-metadata-idle-updater-delta-delay 3
   "Delta Idle Delay limit used by
 `recentloc-marker-buffer-metadata-idle-updater' to start worker
 timer with a random delta delay.")
@@ -480,13 +474,7 @@ timer with a random delta delay.")
                                                            (- (cdr old-curmk-regmks)
                                                               (car old-curmk-regmks))))))
                          (when (or new-timestamp pos/context-update-p)
-                           (run-with-idle-timer
-                            (time-add
-                             (or (current-idle-time) (seconds-to-time 0))
-                             (seconds-to-time
-                              (1+ (random recentloc-marker-buffer-metadata-idle-updater-delta-delay-limit))))
-                            nil
-                            #'recentloc--marker-table-update-metadata
+                           (recentloc--marker-table-update-metadata
                             curmk (not pos/context-update-p) new-timestamp))))
                      ;; remaining buffer marker list
                      rest-buf-mk-lst)
@@ -605,7 +593,16 @@ from `recentloc-marker-record-ring'."
           (when new-marker-p
             (recentloc--marker-table-update-metadata marker nil (current-time))
             (setq buf-mk-lst (-insert-at mk-idx marker buf-mk-lst))
-            (puthash buf buf-mk-lst recentloc-buffer-markers-table)))
+            (puthash buf buf-mk-lst recentloc-buffer-markers-table))
+          ;; a marker change is found in BUF, check others
+          ;; TODO Can we further reduce the workload? Only relevant markers.
+          (run-with-idle-timer
+           (time-add
+            (or (current-idle-time) (seconds-to-time 0))
+            (seconds-to-time
+             recentloc-marker-buffer-metadata-idle-updater-delta-delay))
+           nil
+           #'recentloc-marker-buffer-metadata-idle-updater buf))
       ;; buffer is no longer valid
       (recentloc-marker-buffer-idle-cleaner buf))))
 
@@ -622,7 +619,7 @@ from `recentloc-marker-record-ring'."
 
 The responsibility of the maintainer is:
 1. Clean up all markers associated with dead/gone buffers.
-2. TODO update metadata to speed up searching.
+2. TODO fast algorithms to update metadata to speed up searching.
 
 NOTE: this function shouldn't take too long and hard tasks ought
   to split up."
@@ -631,8 +628,15 @@ NOTE: this function shouldn't take too long and hard tasks ought
     (loop for buf in buf-keys
           do (if (not (buffer-live-p buf))
                  (recentloc-marker-buffer-idle-cleaner buf)
-               ;; try to update metadata
-               (recentloc-marker-buffer-metadata-idle-updater buf)))))
+               ;; the marker at position 1 is usually meaningless
+               (let* ((buf-mk-lst (gethash buf recentloc-buffer-markers-table))
+                      (first-marker (car buf-mk-lst)))
+                 (when (= 1 (marker-position first-marker))
+                   (if (cdr buf-mk-lst)
+                       (puthash buf (cdr buf-mk-lst) recentloc-buffer-markers-table)
+                     ;; no marker left, remove buf
+                     (remhash buf recentloc-buffer-markers-table))
+                   (remhash first-marker recentloc-marker-table)))))))
 
 (defvar recentloc-marker-record-analyzer-idle-delay 1
   "The idle time needed for analyzer to generate markers
