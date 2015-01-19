@@ -439,47 +439,51 @@ timer with a random delta delay.")
 (defun recentloc-marker-buffer-metadata-idle-updater (buf)
   "Update the metadata of all markers associated with BUF in
 `recentloc-marker-table' if necessary."
-  (let ((buf-mk-lst (gethash buf recentloc-buffer-markers-table)))
-    (setq buf-mk-lst
-          (loop for curmk in buf-mk-lst
-                by (lambda (rest-buf-mk-lst)
-                     (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
-                     (let* ((curmk-region (recentloc-get-context-region curmk))
-                            (curmk-meta (gethash curmk recentloc-marker-table))
-                            ;; timestamp
-                            (curmk-time (oref curmk-meta :timestamp))
-                            (new-curmk-time curmk-time)
-                            mk-time
-                            ;; position and context
-                            (old-curmk-reglen (oref curmk-meta :reglen))
-                            (old-curmk-regmks (oref curmk-meta :regmks)))
-                       ;; check the rest of markers behind `curmk'
-                       (loop for mk in rest-buf-mk-lst
-                             while (pos-in-region-p (marker-position mk)
-                                                    curmk-region)
-                             ;; merging markers that are too close, use the most
-                             ;; up-to-date timestamp. (This happens as the user
-                             ;; editing buffers)
-                             do (progn
-                                  (setq mk-time (oref (gethash mk recentloc-marker-table)
-                                                      :timestamp))
-                                  (when (time-less-p curmk-time mk-time)
-                                    (setq new-curmk-time mk-time))
-                                  (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
-                                  (remhash mk recentloc-marker-table)))
-                       ;; all-in-one metadata update
-                       (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
-                                              new-curmk-time))
-                             (pos/context-update-p (not (= old-curmk-reglen
-                                                           (- (cdr old-curmk-regmks)
-                                                              (car old-curmk-regmks))))))
-                         (when (or new-timestamp pos/context-update-p)
-                           (recentloc--marker-table-update-metadata
-                            curmk (not pos/context-update-p) new-timestamp))))
-                     ;; remaining buffer marker list
-                     rest-buf-mk-lst)
-                collect curmk))
-    (puthash buf buf-mk-lst recentloc-buffer-markers-table)))
+  (if (not (buffer-live-p buf))
+      ;; as this is an idle timer, something might happen before this timer
+      ;; starts
+      (recentloc-marker-buffer-idle-cleaner buf)
+    (let ((buf-mk-lst (gethash buf recentloc-buffer-markers-table)))
+      (setq buf-mk-lst
+            (loop for curmk in buf-mk-lst
+                  by (lambda (rest-buf-mk-lst)
+                       (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
+                       (let* ((curmk-region (recentloc-get-context-region curmk))
+                              (curmk-meta (gethash curmk recentloc-marker-table))
+                              ;; timestamp
+                              (curmk-time (oref curmk-meta :timestamp))
+                              (new-curmk-time curmk-time)
+                              mk-time
+                              ;; position and context
+                              (old-curmk-reglen (oref curmk-meta :reglen))
+                              (old-curmk-regmks (oref curmk-meta :regmks)))
+                         ;; check the rest of markers behind `curmk'
+                         (loop for mk in rest-buf-mk-lst
+                               while (pos-in-region-p (marker-position mk)
+                                                      curmk-region)
+                               ;; merging markers that are too close, use the most
+                               ;; up-to-date timestamp. (This happens as the user
+                               ;; editing buffers)
+                               do (progn
+                                    (setq mk-time (oref (gethash mk recentloc-marker-table)
+                                                        :timestamp))
+                                    (when (time-less-p curmk-time mk-time)
+                                      (setq new-curmk-time mk-time))
+                                    (setq rest-buf-mk-lst (cdr rest-buf-mk-lst))
+                                    (remhash mk recentloc-marker-table)))
+                         ;; all-in-one metadata update
+                         (let ((new-timestamp (when (time-less-p curmk-time new-curmk-time)
+                                                new-curmk-time))
+                               (pos/context-update-p (not (= old-curmk-reglen
+                                                             (- (cdr old-curmk-regmks)
+                                                                (car old-curmk-regmks))))))
+                           (when (or new-timestamp pos/context-update-p)
+                             (recentloc--marker-table-update-metadata
+                              curmk (not pos/context-update-p) new-timestamp))))
+                       ;; remaining buffer marker list
+                       rest-buf-mk-lst)
+                  collect curmk))
+      (puthash buf buf-mk-lst recentloc-buffer-markers-table))))
 
 (defclass recentloc-marker-metadata ()
   ((context :initarg :context
@@ -623,20 +627,23 @@ The responsibility of the maintainer is:
 
 NOTE: this function shouldn't take too long and hard tasks ought
   to split up."
-  (let ((buf-keys (hash-table-keys recentloc-buffer-markers-table)))
-    ;; validate buffers
-    (loop for buf in buf-keys
-          do (if (not (buffer-live-p buf))
-                 (recentloc-marker-buffer-idle-cleaner buf)
-               ;; the marker at position 1 is usually meaningless
-               (let* ((buf-mk-lst (gethash buf recentloc-buffer-markers-table))
-                      (first-marker (car buf-mk-lst)))
-                 (when (= 1 (marker-position first-marker))
-                   (if (cdr buf-mk-lst)
-                       (puthash buf (cdr buf-mk-lst) recentloc-buffer-markers-table)
-                     ;; no marker left, remove buf
-                     (remhash buf recentloc-buffer-markers-table))
-                   (remhash first-marker recentloc-marker-table)))))))
+  (loop for buf in (hash-table-keys recentloc-buffer-markers-table)
+        ;; validate buffers
+        do (if (not (buffer-live-p buf))
+               (recentloc-marker-buffer-idle-cleaner buf)
+             ;; the marker at position 1 is usually meaningless
+             (let* ((buf-mk-lst (gethash buf recentloc-buffer-markers-table))
+                    (first-marker (car buf-mk-lst)))
+               (cond
+                ;; TODO first-marker should not be null at this place
+                ((null first-marker)
+                 (recentloc-marker-buffer-idle-cleaner buf))
+                ((= 1 (marker-position first-marker))
+                 (remhash first-marker recentloc-marker-table)
+                 (if (cdr buf-mk-lst)
+                     (puthash buf (cdr buf-mk-lst) recentloc-buffer-markers-table)
+                   ;; no marker left, remove buf
+                   (remhash buf recentloc-buffer-markers-table))))))))
 
 (defvar recentloc-marker-record-analyzer-idle-delay 1
   "The idle time needed for analyzer to generate markers
