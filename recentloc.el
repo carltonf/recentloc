@@ -33,7 +33,7 @@ cons (beg . end)."
     (<= beg pos end)))
 
 ;;;: Mode specific setting
-(defvar recentloc-context-line-num 5
+(defconst recentloc-context-line-num 5
   "The number of lines around the marker that is considered to be
 the context.")
 
@@ -120,7 +120,7 @@ any `recentloc' candidates to get sane results."
                             (delq 'recentloc-mode-line-indicator
                                   mode-line-buffer-identification))))
 
-(defvar recentloc-input-idle-delay 0.1
+(defconst recentloc-input-idle-delay 0.1
   "Be idle for this many seconds before updating recentloc
 searching results")
 
@@ -408,7 +408,7 @@ marker is found, record this marker."
         (loop repeat record-ring-len
               do (ring-remove recentloc-marker-record-ring))))))
 
-(defvar recentloc-marker-buffer-idle-cleaner-delta-delay-limit 5
+(defconst recentloc-marker-buffer-idle-cleaner-delta-delay-limit 5
   "Delta Idle Delay limit used by
 `recentloc-marker-buffer-idle-cleaner' to start worker timer with
 a random delta delay.")
@@ -431,7 +431,7 @@ Supposed to used by other timers."
      nil
      #'cleanup-buf-mks buf)))
 
-(defvar recentloc-marker-buffer-metadata-idle-updater-delta-delay 3
+(defconst recentloc-marker-buffer-metadata-idle-updater-delta-delay 3
   "Delta Idle Delay limit used by
 `recentloc-marker-buffer-metadata-idle-updater' to start worker
 timer with a random delta delay.")
@@ -610,7 +610,7 @@ from `recentloc-marker-record-ring'."
       ;; buffer is no longer valid
       (recentloc-marker-buffer-idle-cleaner buf))))
 
-(defvar recentloc-table-maintainer-idle-delay 3
+(defconst recentloc-table-maintainer-idle-delay 3
   "The idle time before starting `recentloc-table-maintainer'.")
 
 (defvar recentloc-table-maintainer-idle-timer nil
@@ -645,7 +645,7 @@ NOTE: this function shouldn't take too long and hard tasks ought
                    ;; no marker left, remove buf
                    (remhash buf recentloc-buffer-markers-table))))))))
 
-(defvar recentloc-marker-record-analyzer-idle-delay 1
+(defconst recentloc-marker-record-analyzer-idle-delay 1
   "The idle time needed for analyzer to generate markers
 according to history.")
 
