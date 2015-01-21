@@ -349,7 +349,7 @@ MODE is a symbol defines the action takes:
             ;; jump to the first matched string (better than goto the forgotten marker position)
             (let ((region (recentloc-get-context-region chosen-marker)))
               (goto-char (car region))
-              (re-search-forward (regexp-opt (split-string cur-input)) (cdr region))
+              (re-search-forward (regexp-opt (split-string cur-input)) (cdr region) t)
               (recenter))))
         ;; clean up `recentloc' states
         (setq recentloc-buffer-window nil)
