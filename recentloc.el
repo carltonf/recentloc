@@ -270,12 +270,12 @@ MODE is a symbol defines the action takes:
          (cur-input "") (last-input "")
          user-query-str)
     (cl-flet ((all-sane-markers ()
-               "Return all markers that are considered sane, i.e. exclude the marker enclose the current cursor."
-               (loop for mk in (hash-table-keys recentloc-marker-table)
-                     unless (and (eq cursor-buffer (marker-buffer mk))
-                                 (pos-in-region-p (marker-position mk)
-                                                  cursor-region))
-                     collect mk)))
+                                "Return all markers that are considered sane, i.e. exclude the marker enclose the current cursor."
+                                (loop for mk in (hash-table-keys recentloc-marker-table)
+                                      unless (and (eq cursor-buffer (marker-buffer mk))
+                                                  (pos-in-region-p (marker-position mk)
+                                                                   cursor-region))
+                                      collect mk)))
       (setq matched-markers (all-sane-markers))
       (unwind-protect
           (progn
@@ -319,22 +319,62 @@ MODE is a symbol defines the action takes:
                                (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
                            ;; always sync last-input regardless
                            (setq last-input cur-input)))))
-              (setq user-query-str (read-from-minibuffer
-                                    "DWIM-Recentloc: " nil
-                                    (let ((keymap (make-sparse-keymap)))
-                                      (set-keymap-parent keymap minibuffer-local-map)
-                                      (define-key keymap (kbd "C-n")
-                                        (lambda () (interactive)
-                                          (recentloc-jump-cycle-matched-markers matched-markers cur-input 'next)))
-                                      (define-key keymap (kbd "C-p")
-                                        (lambda () (interactive)
-                                          (recentloc-jump-cycle-matched-markers matched-markers cur-input 'prev)))
-                                      (define-key keymap (kbd "C-d")
-                                        (lambda () (interactive)
-                                          (setq recentloc-debug-data
-                                                (cons (recentloc-jump-cycle-chosen-marker matched-markers)
-                                                      recentloc-debug-data))))
-                                      keymap)))))
+              (setq user-query-str
+                    (let ((enable-recursive-minibuffers t))
+                      (read-from-minibuffer
+                       "DWIM-Recentloc: " nil
+                       (let ((keymap (make-sparse-keymap)))
+                         (set-keymap-parent keymap minibuffer-local-map)
+                         (define-key keymap (kbd "<tab>")
+                           ;; completion
+                           (lambda () (interactive)
+                             (let* ((cur-input (minibuffer-contents))
+                                    (cur-input-parts (split-string cur-input))
+                                    (last-part (car (last cur-input-parts)))
+                                    (completion-init-input "")
+                                    completion-input
+                                    res-input-parts)
+                               ;; check whether it's completion without prefix,
+                               ;; not recommended as only 3+ symbols/words are
+                               ;; kept
+                               (if (looking-back "\\s-")
+                                   (setq res-input cur-input-parts)
+                                 ;; with prefix
+                                 (setq res-input (-slice cur-input-parts 0 -1))
+                                 (setq completion-init-input last-part))
+                               (setq completion-input
+                                     (ido-completing-read
+                                      "Completions: "
+                                      ;; TODO brutal completions, replace this with pre-computed metadata
+                                      (let (result)
+                                        (with-temp-buffer
+                                          (loop for mk in (hash-table-keys recentloc-marker-table)
+                                                do (let ((str (oref (gethash mk recentloc-marker-table) :context)))
+                                                     (erase-buffer)
+                                                     (insert str)
+                                                     (goto-char (point-min))
+                                                     ;; TODO use symbols
+                                                     (loop while (re-search-forward "\\sw\\{4,\\}" nil t)
+                                                           do (push (match-string 0) result)))))
+                                        result)
+                                      nil t completion-init-input))
+                               (when completion-input
+                                 (with-current-buffer (window-buffer (minibuffer-window))
+                                   (delete-minibuffer-contents)
+                                   (insert (s-join " " (append res-input
+                                                               (list completion-input)))))))))
+                         (define-key keymap (kbd "C-n")
+                           (lambda () (interactive)
+                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'next)))
+                         (define-key keymap (kbd "C-p")
+                           (lambda () (interactive)
+                             (recentloc-jump-cycle-matched-markers matched-markers cur-input 'prev)))
+                         (define-key keymap (kbd "C-d")
+                           (lambda () (interactive)
+                             (setq recentloc-debug-data
+                                   (cons (recentloc-jump-cycle-chosen-marker matched-markers)
+                                         recentloc-debug-data))))
+                         keymap))))))
         ;; clean up timer first
         (when timer (cancel-timer timer))
         ;; if user confirms selection
