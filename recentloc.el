@@ -105,7 +105,8 @@ any `recentloc' candidates to get sane results."
   (setq recentloc-table-maintainer-idle-timer
         (run-with-idle-timer
          (max recentloc-table-maintainer-idle-delay 3) 'repeat
-         #'recentloc-table-maintainer)))
+         #'recentloc-table-maintainer))
+  (message "Recentloc Enabled."))
 
 (defun recentloc-deinitializer ()
   "Clean up `recentloc'-related settings."
@@ -356,9 +357,6 @@ MODE is a symbol defines the action takes:
         (recentloc-reset-overlays)
         (recentloc-update-mode-line-indicator)
         (setq recentloc-jump-alive-p nil)))))
-
-;;; TODO move this to user settings
-(global-set-key (kbd "C-z m") #'recentloc-jump)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;: Marker Generator & Manager
@@ -793,3 +791,6 @@ every block self-contained (block as defined by ';;:')."
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(provide 'recentloc)
+;; `recentloc' ends here
