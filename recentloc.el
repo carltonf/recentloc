@@ -351,7 +351,18 @@ MODE is a symbol defines the action takes:
             (let ((region (recentloc-get-context-region chosen-marker)))
               (goto-char (car region))
               (re-search-forward (regexp-opt (split-string cur-input)) (cdr region) t)
-              (recenter))))
+              (recenter)
+              ;; hightlighting to help user locate cursor
+              (let ((hl-line-sticky-flag nil)
+                    ;; deceive `hl-line-highlight' that `hl-line-mode' is enabled
+                    (hl-line-mode t))
+                (hl-line-highlight))
+              ;; revoke highlighting in 1.5 sec
+              (run-with-timer 1.5 nil
+                              (lexical-let ((curbuf (current-buffer)))
+                                (lambda ()
+                                  (with-current-buffer curbuf
+                                    (hl-line-unhighlight))))))))
         ;; clean up `recentloc' states
         (setq recentloc-buffer-window nil)
         (recentloc-reset-overlays)
