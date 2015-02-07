@@ -395,7 +395,8 @@ MODE is a symbol defines the action takes:
               ;; hightlighting to help user locate cursor
               (let ((hl-line-sticky-flag nil)
                     ;; deceive `hl-line-highlight' that `hl-line-mode' is enabled
-                    (hl-line-mode t))
+                    (hl-line-mode t)
+                    (hl-line-range-function (lambda () region)))
                 (hl-line-highlight))
               ;; revoke highlighting in 1.5 sec
               (run-with-timer 1.5 nil
