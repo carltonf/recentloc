@@ -257,6 +257,9 @@ MODE is a symbol defines the action takes:
 (defvar recentloc-debug-data nil
   "Helper variable that collects some debug data.")
 
+(defvar recentloc-jump-hist nil
+  "A history of input for `recentloc-jump'")
+
 (defun recentloc-jump ()
   "Master command to jump to a position using `recentloc'"
   (interactive)
@@ -374,7 +377,8 @@ MODE is a symbol defines the action takes:
                              (setq recentloc-debug-data
                                    (cons (recentloc-jump-cycle-chosen-marker matched-markers)
                                          recentloc-debug-data))))
-                         keymap))))))
+                         keymap)
+                       nil 'recentloc-jump-hist)))))
         ;; clean up timer first
         (when timer (cancel-timer timer))
         ;; if user confirms selection
