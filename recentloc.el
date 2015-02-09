@@ -711,7 +711,7 @@ according to history.")
 like (command-symbol . marker). This is ring is initialized to be
 non-empty.")
 
-(defvar recentloc-marker-recorder-ignore-buffers "\\`[ *]"
+(defconst recentloc-marker-recorder-ignore-buffers "\\`[ *#]"
   "Regexp matching the names of buffers to ignore.")
 
 (defun recentloc-marker-recorder ()
