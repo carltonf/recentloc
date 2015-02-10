@@ -63,15 +63,29 @@ MARKER lies."
 (defun recentloc-search-markers (query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers. If QUERY-RE is empty, it's considered all match. "
-  (let* ((matched-markers
-          (loop for marker in markers
-                when (let ((mk-buf (marker-buffer marker))
-                           (mk-meta (gethash marker recentloc-marker-table)))
-                       (when (buffer-live-p mk-buf)
-                         (or (s-blank? query-re)
-                             (s-contains? query-re (oref mk-meta :context)))))
-                collect marker)))
-    matched-markers))
+  (let* ((keyword-sep-idx (s-index-of ":" query-re))
+         (keyword (if keyword-sep-idx
+                      ;; empty keyword is meaningful
+                      (substring query-re 0 keyword-sep-idx) 
+                    nil))
+         (query (substring query-re (if keyword-sep-idx
+                                        (1+ keyword-sep-idx)
+                                      0)))
+         matched-markers)
+    (pcase keyword
+      ((or "b" "buffer")
+       (loop for marker in markers
+             when (s-contains? query (buffer-name (marker-buffer marker)))
+             collect marker))
+      ;; all text searching
+      (t
+       (loop for marker in markers
+             when (let ((mk-buf (marker-buffer marker))
+                        (mk-meta (gethash marker recentloc-marker-table)))
+                    (when (buffer-live-p mk-buf)
+                      (or (s-blank? query)
+                          (s-contains? query (oref mk-meta :context)))))
+             collect marker)))))
 
 (defun recentloc--sort-matched-markers (matched-markers)
   "Sorting MATCHED-MARKERS. Use this function before displaying
@@ -316,7 +330,7 @@ MODE is a symbol defines the action takes:
                                  (setq matched-markers (all-sane-markers)))
                                (loop for single-query in (split-string cur-input)
                                      do (setq matched-markers
-                                              (recentloc-search-markers (regexp-quote single-query)
+                                              (recentloc-search-markers single-query
                                                                         matched-markers)))
                                (setq matched-markers (recentloc--sort-matched-markers matched-markers))
                                (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
@@ -328,6 +342,25 @@ MODE is a symbol defines the action takes:
                        "DWIM-Recentloc: " nil
                        (let ((keymap (make-sparse-keymap)))
                          (set-keymap-parent keymap minibuffer-local-map)
+                         (define-key keymap (kbd ":")
+                           ;; keyword completion
+                           (lambda () (interactive)
+                             (insert ":")
+                             (when (looking-back "\\(?:\\`\\|\\s-\\)\\(.+\\):")
+                               (let ((query-key (match-string-no-properties 1))
+                                     completion-input)
+                                 (pcase query-key
+                                   ((or "b" "buffer")
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "Recentloc Buffers: "
+                                           (mapcar #'buffer-name
+                                                   (hash-table-keys recentloc-buffer-markers-table)))))
+                                   ;; no keywords no actions
+                                   (t nil))
+                                 (when completion-input
+                                   (with-current-buffer (window-buffer (minibuffer-window))
+                                     (insert completion-input)))))))
                          (define-key keymap (kbd "<tab>")
                            ;; completion
                            (lambda () (interactive)
