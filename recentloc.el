@@ -65,7 +65,7 @@ MARKER lies."
     "c" "comment"
     "n" "normal"
     "s" "string"
-    "a" "all"
+    "" "all"                            ;special
     "i" "isearch")
   "A PList of supported query keywords. Each pair is short code
   and its full name.")
@@ -87,7 +87,7 @@ keyword:rest-str. In this case, if no recognized keyword is
 found, a concell of (nil . STR) will be returned."
   (pcase otype
     (:looking-back
-     (when (looking-back "\\(?:\\`\\|\\s-\\)\\(.+\\):")
+     (when (looking-back "\\(?:\\`\\|\\s-\\)\\(.*\\):")
        (lax-plist-get recentloc-query-keywords (match-string-no-properties 1))))
     (:regexp-opt
      (regexp-opt (mapcar
@@ -124,21 +124,39 @@ matched markers. If QUERY-RE is empty, it's considered all match. "
   (let* ((key-query-pair (recentloc-query-str-parse query-re :search)) 
          (keyword (car key-query-pair))
          (query (cdr key-query-pair))
-         matched-markers)
+         matched-markers
+         (collect-mks-with-syms-containing-query-func
+          (lambda (sym-type)
+            (loop for mk in markers
+                  when (member-if (lambda (sym)
+                                    (s-contains? query sym t))
+                                  (slot-value (gethash mk recentloc-marker-table)
+                                              sym-type))
+                  collect mk))))
     (pcase keyword
-      ((or "b" "buffer")
-       (loop for marker in markers
-             when (s-contains? query (buffer-name (marker-buffer marker)))
-             collect marker))
+      ("buffer"
+       (loop for mk in markers
+             when (s-contains? query (buffer-name (marker-buffer mk)) t)
+             collect mk))
+      ("comment"
+       (funcall collect-mks-with-syms-containing-query-func :comment-syms))
+      ("string"
+       (funcall collect-mks-with-syms-containing-query-func :str-syms))
+      ("normal"
+       (funcall collect-mks-with-syms-containing-query-func :normal-syms))
+      ("all"
+       (-uniq (append (funcall collect-mks-with-syms-containing-query-func :normal-syms)
+                      (funcall collect-mks-with-syms-containing-query-func :str-syms)
+                      (funcall collect-mks-with-syms-containing-query-func :comment-syms))))
       ;; all text searching
       (t
-       (loop for marker in markers
-             when (let ((mk-buf (marker-buffer marker))
-                        (mk-meta (gethash marker recentloc-marker-table)))
+       (loop for mk in markers
+             when (let ((mk-buf (marker-buffer mk))
+                        (mk-meta (gethash mk recentloc-marker-table)))
                     (when (buffer-live-p mk-buf)
                       (or (s-blank? query)
-                          (s-contains? query (oref mk-meta :context)))))
-             collect marker)))))
+                          (s-contains? query (oref mk-meta :context) t))))
+             collect mk)))))
 
 (defun recentloc--sort-matched-markers (matched-markers)
   "Sorting MATCHED-MARKERS. Use this function before displaying
@@ -236,15 +254,12 @@ after `recentloc-display-buffer-simple'."
         ;; TODO only for the context
         (goto-char (car context-region))
         (while (and (re-search-forward re (cdr context-region) t)
-                    (> limit 0))
+                    (> (decf limit) 0))
           (let ((overlay (make-overlay (match-beginning 0)
                                        (match-end 0)))
                 (face 'hi-pink))
             (add-to-list 'recentloc-overlays overlay)
-            (overlay-put overlay 'face face)
-            (decf limit)
-            (unless (> limit 0)
-              (message "Limit 200 reached."))))))))
+            (overlay-put overlay 'face face)))))))
 
 ;; (defvar recentloc-minibuffer-local-map
 ;;   "Keymap used for minibuffer input for `recentloc'")
@@ -361,40 +376,40 @@ MODE is a symbol defines the action takes:
                         (run-with-idle-timer
                          (max recentloc-input-idle-delay 0.2) 'repeat
                          (lambda ()
-                           ;; TODO add guard if previous actions are still
-                           ;; ongoing
-                           (save-selected-window
-                             (with-selected-window (or (active-minibuffer-window)
-                                                       (minibuffer-window))
-                               (setq cur-input (s-trim (minibuffer-contents-no-properties)))))
-                           (if (s-equals? last-input cur-input)
-                               ;; do nothing, other than first time bootstrap
-                               (unless recentloc-buffer-window
+                           (when (<= (minibuffer-depth) 1) ;in inner completion, don't run the hook
+                             (save-selected-window
+                               (with-selected-window (or (active-minibuffer-window)
+                                                         (minibuffer-window))
+                                 (setq cur-input (s-trim (minibuffer-contents-no-properties)))))
+                             (if (s-equals? last-input cur-input)
+                                 ;; do nothing, other than first time bootstrap
+                                 (unless recentloc-buffer-window
+                                   (setq matched-markers (recentloc--sort-matched-markers matched-markers))
+                                   (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
+                               (cond
+                                ((s-blank? cur-input)
+                                 (setq matched-markers (all-sane-markers))
                                  (setq matched-markers (recentloc--sort-matched-markers matched-markers))
                                  (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
-                             (cond
-                              ((s-blank? cur-input)
-                               (setq matched-markers (all-sane-markers))
-                               (setq matched-markers (recentloc--sort-matched-markers matched-markers))
-                               (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))
-                              ;; use white space as query string separator
-                              (t
-                               ;; if not incremental search, reset markers
-                               ;; NOTE: empty last input is always the prefix, so skip it
-                               (unless (and (not (s-blank? last-input))
-                                            (s-prefix? last-input cur-input)
-                                            (-is-prefix? (split-string last-input)
-                                                         (split-string cur-input)))
-                                 (setq matched-markers (all-sane-markers)))
-                               (loop for single-query in (split-string cur-input)
-                                     do (setq matched-markers
-                                              (recentloc-search-markers single-query
-                                                                        matched-markers)))
-                               (setq matched-markers (recentloc--sort-matched-markers matched-markers))
-                               (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
-                           ;; always sync last-input regardless
-                           (setq last-input cur-input)))))
+                                ;; use white space as query string separator
+                                (t
+                                 ;; if not incremental search, reset markers
+                                 ;; NOTE: empty last input is always the prefix, so skip it
+                                 (unless (and (not (s-blank? last-input))
+                                              (s-prefix? last-input cur-input)
+                                              (-is-prefix? (split-string last-input)
+                                                           (split-string cur-input)))
+                                   (setq matched-markers (all-sane-markers)))
+                                 (loop for single-query in (split-string cur-input)
+                                       do (setq matched-markers
+                                                (recentloc-search-markers single-query
+                                                                          matched-markers)))
+                                 (setq matched-markers (recentloc--sort-matched-markers matched-markers))
+                                 (recentloc-jump-cycle-matched-markers matched-markers cur-input 'reset))))
+                             ;; always sync last-input regardless
+                             (setq last-input cur-input))))))
               (setq user-query-str
+                    ;; recursive minibuffer enabled to support completion
                     (let ((enable-recursive-minibuffers t))
                       (read-from-minibuffer
                        "DWIM-Recentloc: " nil
@@ -404,27 +419,50 @@ MODE is a symbol defines the action takes:
                            ;; keyword completion
                            (lambda () (interactive)
                              (insert ":")
-                             (let ((query-key (recentloc-query-str-parse nil :looking-back))
-                                   completion-input)
-                               (pcase query-key
-                                 ("buffer"
-                                  (setq completion-input
-                                        (ido-completing-read
-                                         "Recentloc Buffers: "
-                                         (mapcar #'buffer-name
-                                                 (mapcar #'marker-buffer
-                                                         (recentloc--sort-matched-markers matched-markers))))))
-                                 ("comment"
-                                  (setq completion-input
-                                        (ido-completing-read
-                                         "Symbols in Comments: "
-                                         (loop for mk in (recentloc--sort-matched-markers matched-markers)
-                                               append (oref (gethash mk recentloc-marker-table) :comment-syms)))))
-                                 ;; no keywords no actions
-                                 (t nil))
-                               (when completion-input
-                                 (with-current-buffer (window-buffer (minibuffer-window))
-                                   (insert completion-input))))))
+                             ;; only start completion if the current query is
+                             ;; empty i.e no auto-completion if the user is just
+                             ;; modifying the input
+                             (when (member (char-after) '(nil 32 ?\t))
+                               (let ((query-key (recentloc-query-str-parse nil :looking-back))
+                                     completion-input)
+                                 (pcase query-key
+                                   ("buffer"
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "Recentloc Buffers: "
+                                           (mapcar #'buffer-name
+                                                   (mapcar #'marker-buffer matched-markers)))))
+                                   ("comment"
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "Symbols in Comments: "
+                                           (loop for mk in matched-markers
+                                                 append (oref (gethash mk recentloc-marker-table) :comment-syms)))))
+                                   ("string"
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "Symbols in Strings: "
+                                           (loop for mk in matched-markers
+                                                 append (oref (gethash mk recentloc-marker-table) :str-syms)))))
+                                   ("normal"
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "Normal Symbols: "
+                                           (loop for mk in matched-markers
+                                                 append (oref (gethash mk recentloc-marker-table) :normal-syms)))))
+                                   ("all"
+                                    (setq completion-input
+                                          (ido-completing-read
+                                           "All Symbols: "
+                                           (loop for mk in matched-markers
+                                                 append (append (oref (gethash mk recentloc-marker-table) :normal-syms)
+                                                                (oref (gethash mk recentloc-marker-table) :str-syms)
+                                                                (oref (gethash mk recentloc-marker-table) :comment-syms))))))
+                                   ;; no keywords no actions
+                                   (t nil))
+                                 (when completion-input
+                                   (with-current-buffer (window-buffer (minibuffer-window))
+                                     (insert completion-input)))))))
                          (define-key keymap (kbd "<tab>")
                            ;; completion
                            (lambda () (interactive)
