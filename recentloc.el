@@ -60,17 +60,70 @@ MARKER lies."
     (cons (marker-position (car regmks))
           (marker-position (cdr regmks)))))
 
+(defconst recentloc-query-keywords
+  '("b" "buffer"
+    "c" "comment"
+    "n" "normal"
+    "s" "string"
+    "a" "all"
+    "i" "isearch")
+  "A PList of supported query keywords. Each pair is short code
+  and its full name.")
+
+(defun recentloc-query-str-parse (str otype)
+  "Parse a `recentloc' query str STR and return the result according
+to OTYPE. OTYPE can be:
+
+:looking-back Use `looking-back' to find out the keyword, STR is
+ignored, return a full-keyword. Used in minibuffer completion.
+
+:regexp-opt Parse the whole STR, take out the querying part
+    <keyword:> and return a regexp with `regexp-opt'. Used for
+    updating overlays, interactive searching.
+
+:search Parse the whole STR and output a pair (full-keyword .
+rest-str). STR should contain only a single query as
+keyword:rest-str. In this case, if no recognized keyword is
+found, a concell of (nil . STR) will be returned."
+  (pcase otype
+    (:looking-back
+     (when (looking-back "\\(?:\\`\\|\\s-\\)\\(.+\\):")
+       (lax-plist-get recentloc-query-keywords (match-string-no-properties 1))))
+    (:regexp-opt
+     (regexp-opt (mapcar
+                  (lambda (str)
+                    ;; filter out search keywords
+                    (let* ((keyword-sep-idx (s-index-of ":" str))
+                           (keyword (if keyword-sep-idx
+                                        ;; empty keyword is meaningful
+                                        (substring str 0 keyword-sep-idx) 
+                                      nil))
+                           (query (substring str (if keyword-sep-idx
+                                                     (1+ keyword-sep-idx)
+                                                   0))))
+                      (if (member keyword recentloc-query-keywords)
+                          query
+                        str)))
+                  (split-string str))))
+    (:search
+     (let* ((keyword-sep-idx (s-index-of ":" str))
+            (keyword (if keyword-sep-idx
+                         ;; empty keyword is meaningful
+                         (lax-plist-get
+                          recentloc-query-keywords
+                          (substring str 0 keyword-sep-idx)) 
+                       nil))
+            (query (substring str (if keyword
+                                      (1+ keyword-sep-idx)
+                                    0))))
+       (cons keyword query)))))
+
 (defun recentloc-search-markers (query-re markers)
   "Search QUERY-RE through MARKERS context, return a list of
 matched markers. If QUERY-RE is empty, it's considered all match. "
-  (let* ((keyword-sep-idx (s-index-of ":" query-re))
-         (keyword (if keyword-sep-idx
-                      ;; empty keyword is meaningful
-                      (substring query-re 0 keyword-sep-idx) 
-                    nil))
-         (query (substring query-re (if keyword-sep-idx
-                                        (1+ keyword-sep-idx)
-                                      0)))
+  (let* ((key-query-pair (recentloc-query-str-parse query-re :search)) 
+         (keyword (car key-query-pair))
+         (query (cdr key-query-pair))
          matched-markers)
     (pcase keyword
       ((or "b" "buffer")
@@ -177,16 +230,21 @@ after `recentloc-display-buffer-simple'."
              (markerp marker)
              (buffer-live-p (marker-buffer marker)))
     (with-selected-window recentloc-buffer-window
-      (let ((context-region (recentloc-get-context-region marker)))
+      (let ((context-region (recentloc-get-context-region marker))
+            (limit 200))
         (recentloc-reset-overlays)
         ;; TODO only for the context
         (goto-char (car context-region))
-        (while (re-search-forward re (cdr context-region) t)
+        (while (and (re-search-forward re (cdr context-region) t)
+                    (> limit 0))
           (let ((overlay (make-overlay (match-beginning 0)
                                        (match-end 0)))
                 (face 'hi-pink))
             (add-to-list 'recentloc-overlays overlay)
-            (overlay-put overlay 'face face)))))))
+            (overlay-put overlay 'face face)
+            (decf limit)
+            (unless (> limit 0)
+              (message "Limit 200 reached."))))))))
 
 ;; (defvar recentloc-minibuffer-local-map
 ;;   "Keymap used for minibuffer input for `recentloc'")
@@ -256,7 +314,7 @@ MODE is a symbol defines the action takes:
             (if (s-blank? cur-input)
                 (recentloc-reset-overlays)
               (recentloc-update-overlays
-               (regexp-opt (split-string cur-input)) cur-marker))
+               (recentloc-query-str-parse cur-input :regexp-opt) cur-marker))
             (recentloc-update-mode-line-indicator
              (1+ cur-matched-idx) matched-mk-len))
         ;; no matched marker, only update overlays and mode-line
@@ -346,21 +404,27 @@ MODE is a symbol defines the action takes:
                            ;; keyword completion
                            (lambda () (interactive)
                              (insert ":")
-                             (when (looking-back "\\(?:\\`\\|\\s-\\)\\(.+\\):")
-                               (let ((query-key (match-string-no-properties 1))
-                                     completion-input)
-                                 (pcase query-key
-                                   ((or "b" "buffer")
-                                    (setq completion-input
-                                          (ido-completing-read
-                                           "Recentloc Buffers: "
-                                           (mapcar #'buffer-name
-                                                   (hash-table-keys recentloc-buffer-markers-table)))))
-                                   ;; no keywords no actions
-                                   (t nil))
-                                 (when completion-input
-                                   (with-current-buffer (window-buffer (minibuffer-window))
-                                     (insert completion-input)))))))
+                             (let ((query-key (recentloc-query-str-parse nil :looking-back))
+                                   completion-input)
+                               (pcase query-key
+                                 ("buffer"
+                                  (setq completion-input
+                                        (ido-completing-read
+                                         "Recentloc Buffers: "
+                                         (mapcar #'buffer-name
+                                                 (mapcar #'marker-buffer
+                                                         (recentloc--sort-matched-markers matched-markers))))))
+                                 ("comment"
+                                  (setq completion-input
+                                        (ido-completing-read
+                                         "Symbols in Comments: "
+                                         (loop for mk in (recentloc--sort-matched-markers matched-markers)
+                                               append (oref (gethash mk recentloc-marker-table) :comment-syms)))))
+                                 ;; no keywords no actions
+                                 (t nil))
+                               (when completion-input
+                                 (with-current-buffer (window-buffer (minibuffer-window))
+                                   (insert completion-input))))))
                          (define-key keymap (kbd "<tab>")
                            ;; completion
                            (lambda () (interactive)
@@ -427,7 +491,8 @@ MODE is a symbol defines the action takes:
             ;; jump to the first matched string (better than goto the forgotten marker position)
             (let ((region (recentloc-get-context-region chosen-marker)))
               (goto-char (car region))
-              (re-search-forward (regexp-opt (split-string cur-input)) (cdr region) t)
+              (re-search-forward (recentloc-query-str-parse cur-input :regexp-opt)
+                                 (cdr region) t)
               (recenter)
               ;; hightlighting to help user locate cursor
               (let ((hl-line-sticky-flag nil)
@@ -508,10 +573,11 @@ is randomized to create a \"balanced\" workload. The delta limit
 is `recentloc-marker-buffer-idle-cleaner-delta-delay-limit'.
 
 Supposed to used by other timers."
-  (cl-flet ((cleanup-buf-mks (buf)
-                             (loop for mk in (gethash buf recentloc-buffer-markers-table)
-                                   do (remhash mk recentloc-marker-table))
-                             (remhash buf recentloc-buffer-markers-table)))
+  (cl-flet ((cleanup-buf-mks
+             (buf)
+             (loop for mk in (gethash buf recentloc-buffer-markers-table)
+                   do (remhash mk recentloc-marker-table))
+             (remhash buf recentloc-buffer-markers-table)))
     (run-with-idle-timer
      (time-add (or (current-idle-time) (seconds-to-time 0))
                (seconds-to-time (1+ (random recentloc-marker-buffer-idle-cleaner-delta-delay-limit))))
@@ -573,12 +639,7 @@ timer with a random delta delay.")
       (puthash buf buf-mk-lst recentloc-buffer-markers-table))))
 
 (defclass recentloc-marker-metadata ()
-  ((context :initarg :context
-            :initform ""
-            :type string
-            :documentation
-            "Context strings cached to speed up searching.")
-   (timestamp :initarg :timestamp
+  ((timestamp :initarg :timestamp
               :initform (seconds-to-time 0)
               :type (satisfies listp)
               :documentation
@@ -596,23 +657,46 @@ timer with a random delta delay.")
            "A number calculated from `:regmks'. Used to indicate
           whether this region has been changed and thus grant an
           update in the cache. ")
+   (context :initarg :context
+            :initform ""
+            :type string
+            :documentation
+            "Context strings cached to speed up searching.")
+   (normal-syms :initarg :normal-syms
+                :initform '()
+                :type (satisfies listp)
+                :documentation
+                "A list of all normal symbols extracted from the context.")
+   (str-syms :initarg :str-syms
+             :initform '()
+             :type (satisfies listp)
+             :documentation
+             "A list of all symbols within STRING literals
+             extracted from the context.")
+   (comment-syms :initarg :comment-syms
+             :initform '()
+             :type (satisfies listp)
+             :documentation
+             "A list of all symbols within COMMENT literals
+             extracted from the context.")
+   ;;;;;;;;;;;;;;;;;;; Preserved ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
    (count     :initarg :count
               :initform 1
               :type number
               :documentation
-              "The number of visits.")
+              "(Not used) The number of visits.")
    (autotag   :initarg :autotag
               :initform (make-ring 8)
               :type (satisfies ring-p)
               :documentation
-              "Tokenized string list that have been used to
-              switch to this marker")
+              "(Not used) Tokenized string list that have been used to
+              switch to this marker.")
    ;; TODO needs a way to auto-update this in OO way
    (score     :initarg :score
               :initform 0
               :type number
               :documentation
-              "Quantified priority in the search result. Used for
+              "(Not used) Quantified priority in the search result. Used for
               sorting."))
   "Metadata in `recentloc-marker-table'.")
 
@@ -640,11 +724,40 @@ timestamp, count and autotag respectively."
           (oset metadata :regmks regmks)
           (oset metadata :reglen (- end beg))
           (oset metadata
-                :context (s-concat
-                          (format "'%s' '%s' "
-                                  (buffer-name)
-                                  (or (which-function) ""))
-                          (buffer-substring-no-properties beg end)))))
+                :context (buffer-substring-no-properties beg end))
+          (save-excursion
+            (let (old-state
+                  parse-beg
+                  parse-end
+                  normal-syms
+                  syms-in-strings
+                  syms-in-comments)
+              (goto-char beg)
+              (loop while (and (re-search-forward "\\(\\s_\\|\\sw\\)\\{4,\\}" end t))
+                    do (progn
+                         (setq parse-end (point))
+                         (unless old-state
+                           ;; while searching is restricted to the region, parsing
+                           ;; is allowed to move up a structure to get meaningful
+                           ;; result.
+                           (ignore-errors (beginning-of-defun))
+                           (setq parse-beg (point)))
+                         (setq old-state (parse-partial-sexp parse-beg parse-end
+                                                             nil nil
+                                                             old-state))
+                         (setq parse-beg parse-end)
+                         (add-to-list
+                          (cond
+                           ((nth 3 old-state) ;inside a string
+                            'syms-in-strings)
+                           ((nth 4 old-state) ;inside a comment
+                            'syms-in-comments)
+                           (t
+                            'normal-syms))
+                          (match-string-no-properties 0))))
+              (oset metadata :normal-syms normal-syms)
+              (oset metadata :comment-syms syms-in-comments)
+              (oset metadata :str-syms syms-in-strings)))))
       (when timestamp
         (oset metadata :timestamp timestamp))
       (when update-count-p
@@ -784,6 +897,33 @@ non-empty.")
 ;;;: Test area.
 ;;; Useful code for debugging, copy to other buffers to use them.
 
+(defconst recentloc-reset-data-to-migrate
+  (loop for mk in (hash-table-keys recentloc-marker-table)
+        collect (list mk (oref (gethash mk recentloc-marker-table) :timestamp)))
+  "`recentloc-marker-metadata' has been modified. This variable
+is used to hold all data needed to migrate. Currently the
+following metadata is preserved:
+
+:timestamp
+
+WARNING: use this after `recentloc-deinitializer' and *BEFORE*
+redefining `recentloc-marker-metadata'.
+
+TODO maybe we should separate `recentloc-marker-metadata' into
+two data structure: core that needs migration and cache which
+exists only to speed up searching.")
+
+(defun recentloc-reset-marker-metadata ()
+  "Reset marker metadata by using preserved data from
+`recentloc-reset-data-to-migrate'. "
+  (unless recentloc-reset-data-to-migrate
+    (error "You need to save core metadata first."))
+  (clrhash recentloc-marker-table)
+  (loop for mk-meta in recentloc-reset-data-to-migrate
+        do (recentloc--marker-table-update-metadata
+            (car mk-meta) nil (nth 1 mk-meta)))
+  recentloc-marker-table)
+
 (defun recentloc-data-reset ()
   "Reset all `recentloc' metadata. This includes the metadata
 part in `recentloc-marker-table' and all of
@@ -794,12 +934,6 @@ development.
 
 More about data structure clarity than efficiency. Try to make
 every block self-contained (block as defined by ';;:')."
-
-  ;;: regenerate the metadata part of `recentloc-marker-table', only context for
-  ;; now
-  (loop for mk in (hash-table-keys recentloc-marker-table)
-        do (recentloc--marker-table-update-metadata
-            mk nil (oref (gethash mk recentloc-marker-table) :timestamp)))
 
   ;;: Regenerate `recentloc-buffer-markers-table' from markers in
   ;;`recentloc-marker-table'.
