@@ -763,39 +763,41 @@ timestamp, count and autotag respectively."
           (oset metadata :reglen (- end beg))
           (oset metadata
                 :context (buffer-substring-no-properties beg end))
-          (save-excursion
-            (let (old-state
-                  parse-beg
-                  parse-end
-                  normal-syms
-                  syms-in-strings
-                  syms-in-comments)
-              (goto-char beg)
-              (loop while (and (re-search-forward "\\(\\s_\\|\\sw\\)\\{4,\\}" end t))
-                    do (progn
-                         (setq parse-end (point))
-                         (unless old-state
-                           ;; while searching is restricted to the region, parsing
-                           ;; is allowed to move up a structure to get meaningful
-                           ;; result.
-                           (ignore-errors (beginning-of-defun))
-                           (setq parse-beg (point)))
-                         (setq old-state (parse-partial-sexp parse-beg parse-end
-                                                             nil nil
-                                                             old-state))
-                         (setq parse-beg parse-end)
-                         (add-to-list
-                          (cond
-                           ((nth 3 old-state) ;inside a string
-                            'syms-in-strings)
-                           ((nth 4 old-state) ;inside a comment
-                            'syms-in-comments)
-                           (t
-                            'normal-syms))
-                          (match-string-no-properties 0))))
-              (oset metadata :normal-syms normal-syms)
-              (oset metadata :comment-syms syms-in-comments)
-              (oset metadata :str-syms syms-in-strings)))))
+          (save-restriction
+            (save-excursion
+              (widen)
+              (let (old-state
+                    parse-beg
+                    parse-end
+                    normal-syms
+                    syms-in-strings
+                    syms-in-comments)
+                (goto-char beg)
+                (loop while (and (re-search-forward "\\(\\s_\\|\\sw\\)\\{4,\\}" end t))
+                      do (progn
+                           (setq parse-end (point))
+                           (unless old-state
+                             ;; while searching is restricted to the region, parsing
+                             ;; is allowed to move up a structure to get meaningful
+                             ;; result.
+                             (ignore-errors (beginning-of-defun))
+                             (setq parse-beg (point)))
+                           (setq old-state (parse-partial-sexp parse-beg parse-end
+                                                               nil nil
+                                                               old-state))
+                           (setq parse-beg parse-end)
+                           (add-to-list
+                            (cond
+                             ((nth 3 old-state) ;inside a string
+                              'syms-in-strings)
+                             ((nth 4 old-state) ;inside a comment
+                              'syms-in-comments)
+                             (t
+                              'normal-syms))
+                            (match-string-no-properties 0))))
+                (oset metadata :normal-syms normal-syms)
+                (oset metadata :comment-syms syms-in-comments)
+                (oset metadata :str-syms syms-in-strings))))))
       (when timestamp
         (oset metadata :timestamp timestamp))
       (when update-count-p
