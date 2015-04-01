@@ -773,8 +773,8 @@ timestamp, count and autotag respectively."
                     syms-in-strings
                     syms-in-comments)
                 (goto-char beg)
-                (loop while (and (re-search-forward "\\(\\s_\\|\\sw\\)\\{4,\\}" end t))
-                      do (progn
+                (loop while (re-search-forward "\\(\\s_\\|\\sw\\)\\{4,\\}" end t)
+                      do (let ((matched-sym (match-string-no-properties 0)))
                            (setq parse-end (point))
                            (unless old-state
                              ;; while searching is restricted to the region, parsing
@@ -794,7 +794,7 @@ timestamp, count and autotag respectively."
                               'syms-in-comments)
                              (t
                               'normal-syms))
-                            (match-string-no-properties 0))))
+                            matched-sym)))
                 (oset metadata :normal-syms normal-syms)
                 (oset metadata :comment-syms syms-in-comments)
                 (oset metadata :str-syms syms-in-strings))))))
